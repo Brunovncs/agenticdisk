@@ -299,7 +299,12 @@ mod tests {
         let temp = std::env::temp_dir();
         let escaped = temp.join("..").join("..").join("..").join("Documents");
         assert!(kb.explain(&escaped).is_none_or(|(r, _)| r.id != "win.temp_user"));
-        assert!(is_within(Path::new("C:\\A\\B\\..\\B\\c"), Path::new("c:/a/b")));
-        assert!(!is_within(Path::new("C:\\A\\Bc"), Path::new("C:\\A\\B")));
+        if cfg!(windows) {
+            assert!(is_within(Path::new("C:\\A\\B\\..\\B\\c"), Path::new("c:/a/b")));
+            assert!(!is_within(Path::new("C:\\A\\Bc"), Path::new("C:\\A\\B")));
+        } else {
+            assert!(is_within(Path::new("/a/b/../b/c"), Path::new("/a/b")));
+            assert!(!is_within(Path::new("/a/bc"), Path::new("/a/b")));
+        }
     }
 }

@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows (lint, test, build, smoke)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      # Read-only end-to-end checks on a clean machine. Nothing here may change the runner:
+      # `apply` is called without --yes and must stop at the confirmation step.
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = '.\target\release\agenticdisk.exe'
+          function Run([string[]] $cmd) {
+            $out = & $exe @cmd
+            if ($LASTEXITCODE -ne 0) { throw "agenticdisk $($cmd -join ' ') exited $LASTEXITCODE`n$out" }
+            $out | ConvertFrom-Json
+          }
+
+          $goals = Run @('goals')
+          if ($goals.goals.Count -lt 8) { throw 'goals: expected 8 goals' }
+
+          $rules = Run @('rules')
+          if ($rules.count -lt 40) { throw "rules: only $($rules.count) rules loaded" }
+
+          $overview = Run @('overview', '--timeout', '120')
+          foreach ($area in 'system','cleanup','drivers','privacy','startup','apps','security','stability') {
+            if ($null -eq $overview.sections.$area) { throw "overview: section $area missing" }
+          }
+          "overview: $($overview.took_ms) ms, $($overview.findings.Count) findings"
+
+          $explain = Run @('explain', "$env:USERPROFILE\Documents")
+          if (-not $explain.protected) { throw 'explain: Documents must be protected' }
+
+          $plan = Run @('plan', 'privacy')
+          if ($plan.actions.Count -gt 0) {
+            $preview = Run @('apply', $plan.plan, '--actions', $plan.actions[0].id)
+            if ($preview.status -ne 'awaiting_confirmation') { throw "apply without --yes must not run (status: $($preview.status))" }
+          }
+
+          $all = & $exe apply $plan.plan --actions all | ConvertFrom-Json
+          if (-not $all.error) { throw 'apply --actions all must be refused' }
+          'smoke test passed'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agenticdisk-windows-x64
+          path: target/release/agenticdisk.exe
+          if-no-files-found: error
+
+  linux:
+    name: Linux (portable core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test core
+        run: cargo test -p agenticdisk-core --locked

@@ -393,6 +393,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn guard_refuses_broad_and_linked_targets() {
         let home = PathBuf::from(home_dir().unwrap());
         assert!(guard(&home).is_err());
