@@ -1,0 +1,334 @@
+# Installed-software knowledge. `appx` rules match Store package names, `win32` rules match the
+# DisplayName in Add/Remove Programs (globs, case-insensitive).
+#
+# category: bloat    preinstalled, nobody misses it            -> grouped removal, safety safe
+#           optional preinstalled, some people use it         -> listed, safety caution
+#           trialware OEM antivirus/offers                    -> listed, safety caution
+#           pup      potentially unwanted program / hijacker  -> security finding
+
+# --- Store (appx) ---------------------------------------------------------------------------------
+
+[[appx]]
+name = "Microsoft.BingNews"
+what = "Microsoft News"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.BingWeather"
+what = "MSN Weather"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.BingSearch"
+what = "Bing Search integration"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.GetHelp"
+what = "Get Help"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.Getstarted"
+what = "Tips"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.MicrosoftOfficeHub"
+what = "Microsoft 365 (Office) hub / upsell"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.MicrosoftSolitaireCollection"
+what = "Solitaire Collection (ads)"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.People"
+what = "People"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.WindowsFeedbackHub"
+what = "Feedback Hub"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.WindowsMaps"
+what = "Maps"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.ZuneVideo"
+what = "Movies & TV"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.549981C3F5F10"
+what = "Cortana (discontinued)"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.MixedReality.Portal"
+what = "Mixed Reality Portal"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.Microsoft3DViewer"
+what = "3D Viewer"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.SkypeApp"
+what = "Skype (retired)"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.Windows.DevHome"
+what = "Dev Home (retired)"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.Wallet"
+what = "Wallet"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.Messaging"
+what = "Messaging"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.Office.Sway"
+what = "Sway"
+category = "bloat"
+
+[[appx]]
+name = "Microsoft.PowerAutomateDesktop"
+what = "Power Automate"
+category = "optional"
+
+[[appx]]
+name = "Clipchamp.Clipchamp"
+what = "Clipchamp video editor"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.Todos"
+what = "Microsoft To Do"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.ZuneMusic"
+what = "Media Player (default music/video player)"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.YourPhone"
+what = "Phone Link"
+category = "optional"
+
+[[appx]]
+name = "MicrosoftTeams"
+what = "Teams (consumer chat)"
+category = "optional"
+
+[[appx]]
+name = "MSTeams"
+what = "Microsoft Teams"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.OutlookForWindows"
+what = "New Outlook"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.Copilot"
+what = "Copilot app"
+category = "optional"
+
+[[appx]]
+name = "MicrosoftWindows.Client.WebExperience"
+what = "Widgets board (news feed)"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.GamingApp"
+what = "Xbox app (needed for Game Pass PC)"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.XboxGamingOverlay"
+what = "Xbox Game Bar (Win+G)"
+category = "optional"
+
+[[appx]]
+name = "Microsoft.MicrosoftStickyNotes"
+what = "Sticky Notes"
+category = "optional"
+
+[[appx]]
+name = "king.com.*"
+what = "Candy Crush / King games (promoted install)"
+category = "optional"
+
+[[appx]]
+name = "*Disney*"
+what = "Disney+ (promoted install)"
+category = "optional"
+
+[[appx]]
+name = "*BytedancePte*"
+what = "TikTok (promoted install)"
+category = "optional"
+
+[[appx]]
+name = "Facebook.*"
+what = "Facebook / Instagram / Messenger (may be a promoted install, or installed on purpose)"
+category = "optional"
+
+[[appx]]
+name = "AmazonVideo.PrimeVideo"
+what = "Prime Video (promoted install)"
+category = "optional"
+
+[[appx]]
+name = "*LinkedInforWindows"
+what = "LinkedIn (promoted install)"
+category = "optional"
+
+[[appx]]
+name = "*Netflix*"
+what = "Netflix (promoted install)"
+category = "optional"
+
+[[appx]]
+name = "*McAfee*"
+what = "McAfee (OEM trial)"
+category = "trialware"
+
+[[appx]]
+name = "AD2F1837.*"
+what = "HP OEM app"
+category = "optional"
+
+[[appx]]
+name = "DellInc.*"
+what = "Dell OEM app"
+category = "optional"
+
+[[appx]]
+name = "E046963F.*"
+what = "Lenovo OEM app"
+category = "optional"
+
+[[appx]]
+name = "AcerIncorporated.*"
+what = "Acer OEM app"
+category = "optional"
+
+# --- Desktop programs (win32) ---------------------------------------------------------------------
+
+[[win32]]
+name = "McAfee*"
+what = "McAfee (usually an OEM trial; Defender already protects this PC)"
+category = "trialware"
+
+[[win32]]
+name = "Norton*"
+what = "Norton (usually an OEM trial; Defender already protects this PC)"
+category = "trialware"
+
+[[win32]]
+name = "*WildTangent*"
+what = "WildTangent games (OEM bundle)"
+category = "bloat"
+
+[[win32]]
+name = "Wave Browser*"
+what = "Wave Browser: browser hijacker that installs itself through bundles"
+category = "pup"
+severity = "high"
+
+[[win32]]
+name = "OneLaunch*"
+what = "OneLaunch: adware search bar/launcher"
+category = "pup"
+severity = "high"
+
+[[win32]]
+name = "Shift Browser*"
+what = "Shift Browser: bundled browser flagged as PUP"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "*Segurazo*"
+what = "Segurazo / SAntivirus: rogue antivirus"
+category = "pup"
+severity = "high"
+
+[[win32]]
+name = "*ByteFence*"
+what = "ByteFence: bundled anti-malware flagged as PUP"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "*WebDiscover*"
+what = "WebDiscover Browser: browser hijacker"
+category = "pup"
+severity = "high"
+
+[[win32]]
+name = "*Driver Booster*"
+what = "IObit Driver Booster: driver updater flagged as PUP; installs drivers from unofficial sources"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "*Advanced SystemCare*"
+what = "IObit Advanced SystemCare: 'optimizer' flagged as PUP"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "Driver Easy*"
+what = "Driver Easy: driver updater flagged as PUP"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "*Reimage*"
+what = "Reimage Repair: scareware 'PC repair'"
+category = "pup"
+severity = "high"
+
+[[win32]]
+name = "*Restoro*"
+what = "Restoro: scareware 'PC repair'"
+category = "pup"
+severity = "high"
+
+[[win32]]
+name = "*PC Optimizer*"
+what = "'PC Optimizer' scareware family"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "*Hola*VPN*"
+what = "Hola VPN: sells users' bandwidth as exit nodes"
+category = "pup"
+severity = "medium"
+
+[[win32]]
+name = "*Avast Secure Browser*"
+what = "Avast Secure Browser (bundled with Avast installers)"
+category = "optional"
+
+[[win32]]
+name = "*CCleaner*"
+what = "CCleaner: bundles offers; Windows Storage Sense does the useful part"
+category = "optional"

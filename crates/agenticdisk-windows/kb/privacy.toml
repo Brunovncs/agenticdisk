@@ -1,0 +1,226 @@
+# Registry-backed privacy, telemetry, ads and housekeeping checks.
+#
+# keys:    looked up in order; the first key holding `value` decides (policy before user setting).
+# good:    acceptable values (DWORDs as numbers, strings as strings).
+# missing: what an absent value means: "bad" (the Windows default is the unwanted behavior),
+#          "good", or "unset" (report the state, raise no finding).
+# set:     DWORD the fix writes. The fix is generated as `reg add` (creates the key if missing and
+#          never touches other values; `New-Item -Force` would wipe them). Written to `target`,
+#          default keys[0]. `also` = extra [name, dword] pairs written to the same key.
+# fix:     hand-written PowerShell, only when `set` cannot express it.
+# admin:   needs an elevated shell (automatic for HKLM targets).
+
+[[check]]
+id = "privacy.telemetry_level"
+area = "privacy"
+title = "Optional diagnostic data is sent to Microsoft"
+keys = ['HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection', 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection']
+value = "AllowTelemetry"
+good = [0, 1]
+missing = "bad"
+severity = "low"
+set = 1
+note = "1 = required data only. 0 (off) is honored only on Enterprise/Education."
+
+[[check]]
+id = "privacy.diagtrack_service"
+area = "privacy"
+title = "Connected User Experiences and Telemetry service (DiagTrack) is enabled"
+keys = ['HKLM\SYSTEM\CurrentControlSet\Services\DiagTrack']
+value = "Start"
+good = [4]
+missing = "good"
+severity = "low"
+safety = "caution"
+fix = "Stop-Service DiagTrack -Force; Set-Service DiagTrack -StartupType Disabled"
+admin = true
+note = "Widely disabled; may delay some Insider/feedback features. Undo: Set-Service DiagTrack -StartupType Automatic"
+
+[[check]]
+id = "privacy.advertising_id"
+area = "privacy"
+title = "Advertising ID is enabled for apps"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo']
+value = "Enabled"
+good = [0]
+missing = "bad"
+severity = "low"
+set = 0
+target = 'HKCU\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo'
+
+[[check]]
+id = "privacy.tailored_experiences"
+area = "privacy"
+title = "Tailored experiences from diagnostic data are enabled"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\Privacy']
+value = "TailoredExperiencesWithDiagnosticDataEnabled"
+good = [0]
+missing = "bad"
+severity = "low"
+set = 0
+
+[[check]]
+id = "privacy.activity_history"
+area = "privacy"
+title = "Activity history is published"
+keys = ['HKLM\SOFTWARE\Policies\Microsoft\Windows\System']
+value = "PublishUserActivities"
+good = [0]
+missing = "bad"
+severity = "low"
+set = 0
+
+[[check]]
+id = "privacy.web_search_in_start"
+area = "privacy"
+title = "Start menu search sends queries to Bing"
+keys = ['HKCU\Software\Policies\Microsoft\Windows\Explorer']
+value = "DisableSearchBoxSuggestions"
+good = [1]
+missing = "bad"
+severity = "low"
+set = 1
+note = "Applies after sign-out or Explorer restart. Start search becomes local-only."
+
+[[check]]
+id = "privacy.inking_typing"
+area = "privacy"
+title = "Inking and typing personalization data is collected"
+keys = ['HKCU\Software\Microsoft\InputPersonalization']
+value = "RestrictImplicitTextCollection"
+good = [1]
+missing = "bad"
+severity = "info"
+set = 1
+also = [["RestrictImplicitInkCollection", 1]]
+
+[[check]]
+id = "privacy.feedback_prompts"
+area = "privacy"
+title = "Windows asks for feedback periodically"
+keys = ['HKCU\Software\Microsoft\Siuf\Rules']
+value = "NumberOfSIUFInPeriod"
+good = [0]
+missing = "bad"
+severity = "info"
+set = 0
+
+[[check]]
+id = "privacy.recall_snapshots"
+area = "privacy"
+title = "Recall snapshots are not disabled by policy"
+keys = ['HKCU\Software\Policies\Microsoft\Windows\WindowsAI', 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsAI']
+value = "DisableAIDataAnalysis"
+good = [1]
+missing = "unset"
+severity = "info"
+set = 1
+note = "Only relevant on Copilot+ PCs where Recall is installed."
+
+[[check]]
+id = "privacy.location"
+area = "privacy"
+title = "Location access is allowed system-wide"
+keys = ['HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location']
+value = "Value"
+good = ["Deny"]
+missing = "unset"
+severity = "info"
+note = "A user choice, not a problem by itself; per-app access is in Settings > Privacy > Location."
+
+# --- Ads and promoted content ---------------------------------------------------------------------
+
+[[check]]
+id = "ads.silent_app_installs"
+area = "privacy"
+title = "Windows silently installs promoted apps (Candy Crush, TikTok...)"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager']
+value = "SilentInstalledAppsEnabled"
+good = [0]
+missing = "bad"
+severity = "medium"
+set = 0
+also = [["PreInstalledAppsEnabled", 0], ["OemPreInstalledAppsEnabled", 0]]
+
+[[check]]
+id = "ads.start_suggestions"
+area = "privacy"
+title = "Suggested apps / ads in Start"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager']
+value = "SystemPaneSuggestionsEnabled"
+good = [0]
+missing = "bad"
+severity = "low"
+set = 0
+
+[[check]]
+id = "ads.start_recommendations"
+area = "privacy"
+title = "Start shows promotional recommendations (tips, new apps)"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced']
+value = "Start_IrisRecommendations"
+good = [0]
+missing = "bad"
+severity = "low"
+set = 0
+
+[[check]]
+id = "ads.tips_and_suggestions"
+area = "privacy"
+title = "Tips, tricks and suggestions notifications"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager']
+value = "SubscribedContent-338389Enabled"
+good = [0]
+missing = "bad"
+severity = "low"
+set = 0
+
+[[check]]
+id = "ads.settings_suggestions"
+area = "privacy"
+title = "Suggested content in the Settings app"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager']
+value = "SubscribedContent-338393Enabled"
+good = [0]
+missing = "bad"
+severity = "info"
+set = 0
+also = [["SubscribedContent-353694Enabled", 0], ["SubscribedContent-353696Enabled", 0]]
+
+[[check]]
+id = "ads.lockscreen_tips"
+area = "privacy"
+title = "Fun facts, tips and ads on the lock screen"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager']
+value = "RotatingLockScreenOverlayEnabled"
+good = [0]
+missing = "bad"
+severity = "info"
+set = 0
+also = [["SubscribedContent-338387Enabled", 0]]
+
+# --- Performance / housekeeping -------------------------------------------------------------------
+
+[[check]]
+id = "perf.game_dvr"
+area = "system"
+title = "Game DVR background recording is enabled"
+keys = ['HKCU\System\GameConfigStore']
+value = "GameDVR_Enabled"
+good = [0]
+missing = "bad"
+severity = "info"
+safety = "caution"
+set = 0
+note = "Costs some GPU/CPU in games. Disables Win+Alt+R 'record that'."
+
+[[check]]
+id = "cleanup.storage_sense"
+area = "cleanup"
+title = "Storage Sense (automatic temp/recycle cleanup) is off"
+keys = ['HKCU\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy']
+value = "01"
+good = [1]
+missing = "bad"
+severity = "low"
+set = 1

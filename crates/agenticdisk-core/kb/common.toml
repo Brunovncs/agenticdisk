@@ -1,0 +1,99 @@
+# Rules that apply on every OS. `dir_name` rules are matched during a full `disk` scan;
+# `paths` rules are measured directly by `cleanup` (env vars and `*` globs allowed, `~` = home).
+#
+# safety: safe | caution | manual | never   (see Safety in model.rs)
+# clean:  contents (agenticdisk clean may empty it) | none (use `command` or do it by hand)
+
+[[rule]]
+id = "dev.node_modules"
+category = "dev"
+dir_name = "node_modules"
+parent_has = "package.json"
+what = "npm/pnpm/yarn dependencies of a JS project"
+safety = "caution"
+clean = "none"
+note = "Restored by `npm install` / `pnpm install`. Prefer deleting in projects not touched for months."
+
+[[rule]]
+id = "dev.rust_target"
+category = "dev"
+dir_name = "target"
+parent_has = "Cargo.toml"
+what = "Rust build output"
+safety = "safe"
+clean = "none"
+command = "cargo clean"
+note = "Run inside the project folder. Next build is a full rebuild."
+
+[[rule]]
+id = "dev.python_venv"
+category = "dev"
+dir_name = "*venv*"
+contains = "pyvenv.cfg"
+what = "Python virtual environment"
+safety = "caution"
+clean = "none"
+note = "Recreate from requirements/pyproject. Check it is not an app's bundled runtime."
+
+[[rule]]
+id = "dev.pycache"
+category = "dev"
+dir_name = "__pycache__"
+what = "Python bytecode cache"
+safety = "safe"
+clean = "none"
+
+[[rule]]
+id = "dev.next_cache"
+category = "dev"
+dir_name = ".next"
+parent_has = "package.json"
+what = "Next.js build output and cache"
+safety = "safe"
+clean = "none"
+
+[[rule]]
+id = "dev.turbo_cache"
+category = "dev"
+dir_name = ".turbo"
+what = "Turborepo local cache"
+safety = "safe"
+clean = "none"
+
+[[rule]]
+id = "dev.gradle_project"
+category = "dev"
+dir_name = ".gradle"
+parent_has = "settings.gradle*"
+what = "Gradle per-project cache"
+safety = "safe"
+clean = "none"
+
+[[rule]]
+id = "dev.dotnet_obj"
+category = "dev"
+dir_name = "obj"
+parent_has = "*.csproj"
+what = ".NET intermediate build output"
+safety = "safe"
+clean = "none"
+command = "dotnet clean"
+
+[[rule]]
+id = "dev.tool_caches"
+category = "dev"
+dir_name = "{.pytest_cache,.mypy_cache,.ruff_cache,.tox,.parcel-cache}"
+what = "Linter/test tool cache"
+safety = "safe"
+clean = "none"
+
+[[rule]]
+id = "dev.git_objects"
+reclaimable = false
+category = "dev"
+dir_name = ".git"
+what = "Git repository history"
+safety = "manual"
+clean = "none"
+command = "git gc --aggressive --prune=now"
+note = "Never delete. `git gc` can shrink it; large size usually means big binaries were committed."

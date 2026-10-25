@@ -1,0 +1,468 @@
+# Windows space knowledge base. See common.toml for the field reference.
+# `measure = false` marks classification-only rules: shown in `disk` output, never sized by `cleanup`.
+
+# --- Windows itself -------------------------------------------------------------------------------
+
+[[rule]]
+id = "win.temp_user"
+min_age_days = 7
+category = "temp"
+paths = ['%TEMP%']
+what = "Current user's temp files"
+safety = "safe"
+clean = "contents"
+note = "Files in use and anything changed in the last 7 days are kept (running installers, open sessions)."
+
+[[rule]]
+id = "win.temp_system"
+min_age_days = 7
+category = "temp"
+paths = ['%SystemRoot%\Temp']
+what = "System temp files"
+safety = "safe"
+clean = "contents"
+admin = true
+
+[[rule]]
+id = "win.update_cache"
+consent = "cache"
+category = "system"
+paths = ['%SystemRoot%\SoftwareDistribution\Download']
+what = "Downloaded Windows Update packages"
+safety = "caution"
+clean = "none"
+admin = true
+command = "Stop-Service wuauserv,bits -Force; Remove-Item \"$env:SystemRoot\\SoftwareDistribution\\Download\\*\" -Recurse -Force; Start-Service wuauserv,bits"
+note = "Safe once updates finished installing; a pending update would re-download."
+
+[[rule]]
+id = "win.delivery_optimization"
+consent = "cache"
+category = "system"
+paths = ['%SystemRoot%\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache']
+what = "Delivery Optimization peer cache (update chunks shared with other PCs)"
+safety = "safe"
+clean = "none"
+admin = true
+command = "Delete-DeliveryOptimizationCache -Force"
+
+[[rule]]
+id = "win.old"
+category = "system"
+paths = ['%SystemDrive%\Windows.old']
+what = "Previous Windows installation (rollback copy)"
+safety = "caution"
+clean = "none"
+admin = true
+command = "cleanmgr /d C: /VERYLOWDISK"
+note = "Removes the ability to roll back the last feature update. Settings > System > Storage > Temporary files also works."
+
+[[rule]]
+id = "win.esd_install"
+category = "system"
+paths = ['%SystemDrive%\$WINDOWS.~BT', '%SystemDrive%\$WINDOWS.~WS', '%SystemDrive%\ESD']
+what = "Leftover Windows upgrade/setup files"
+safety = "caution"
+clean = "none"
+admin = true
+command = "cleanmgr /d C: /VERYLOWDISK"
+
+[[rule]]
+id = "win.winsxs"
+category = "system"
+paths = ['%SystemRoot%\WinSxS']
+measure = false
+what = "Windows component store (hardlinked into System32; real size is far smaller than it looks)"
+safety = "never"
+clean = "none"
+admin = true
+command = "Dism /Online /Cleanup-Image /StartComponentCleanup"
+note = "Never delete files here. Analyze first: Dism /Online /Cleanup-Image /AnalyzeComponentStore"
+
+[[rule]]
+id = "win.installer"
+category = "system"
+paths = ['%SystemRoot%\Installer']
+measure = false
+what = "MSI/MSP cache used to repair and uninstall programs"
+safety = "never"
+clean = "none"
+note = "Deleting breaks uninstall/repair of installed programs."
+
+[[rule]]
+id = "win.driverstore"
+consent = "software"
+category = "system"
+paths = ['%SystemRoot%\System32\DriverStore\FileRepository']
+measure = false
+what = "Driver package store (old driver versions pile up here)"
+safety = "never"
+clean = "none"
+note = "Use `agenticdisk drivers`: it lists superseded packages and the exact `pnputil /delete-driver` for each."
+
+[[rule]]
+id = "win.hiberfil"
+category = "system"
+paths = ['%SystemDrive%\hiberfil.sys']
+what = "Hibernation file (sized to a fraction of RAM)"
+safety = "caution"
+clean = "none"
+admin = true
+command = "powercfg /h off"
+note = "Disables hibernate and Fast Startup. `powercfg /h /type reduced` keeps Fast Startup with a smaller file."
+
+[[rule]]
+id = "win.pagefile"
+category = "system"
+paths = ['%SystemDrive%\pagefile.sys', '%SystemDrive%\swapfile.sys']
+measure = false
+what = "Virtual memory paging file"
+safety = "never"
+clean = "none"
+note = "Managed by Windows. Shrinking it can cause crashes under memory pressure."
+
+[[rule]]
+id = "win.memory_dumps"
+category = "logs"
+paths = ['%SystemRoot%\MEMORY.DMP', '%SystemRoot%\Minidump', '%SystemRoot%\LiveKernelReports']
+what = "Crash dumps (BSOD / kernel live dumps)"
+safety = "caution"
+clean = "contents"
+admin = true
+note = "Keep them if you are still debugging crashes."
+
+[[rule]]
+id = "win.user_crashdumps"
+min_age_days = 3
+category = "logs"
+paths = ['%LOCALAPPDATA%\CrashDumps']
+what = "Application crash dumps"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "win.wer"
+min_age_days = 7
+category = "logs"
+paths = ['%ProgramData%\Microsoft\Windows\WER', '%LOCALAPPDATA%\Microsoft\Windows\WER']
+what = "Windows Error Reporting queue and archive"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "win.cbs_logs"
+category = "logs"
+paths = ['%SystemRoot%\Logs\CBS']
+what = "Component-based servicing logs"
+safety = "safe"
+clean = "contents"
+admin = true
+
+[[rule]]
+id = "win.recycle_bin"
+category = "user"
+paths = ['%SystemDrive%\$Recycle.Bin']
+what = "Recycle Bin"
+safety = "manual"
+clean = "none"
+command = "Clear-RecycleBin -Force"
+note = "User-deleted files; confirm with the user before emptying."
+
+[[rule]]
+id = "win.inetcache"
+min_age_days = 7
+keep = ['Content.Outlook', 'Content.MSO']
+category = "cache"
+paths = ['%LOCALAPPDATA%\Microsoft\Windows\INetCache']
+what = "Legacy internet / WebView cache"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "win.thumbcache"
+category = "cache"
+paths = ['%LOCALAPPDATA%\Microsoft\Windows\Explorer']
+what = "Thumbnail and icon cache"
+safety = "safe"
+clean = "contents"
+note = "Rebuilt on demand; Explorer locks the live files, those are skipped."
+
+[[rule]]
+id = "win.search_index"
+consent = "cache"
+category = "system"
+paths = ['%ProgramData%\Microsoft\Search\Data']
+measure = false
+what = "Windows Search index"
+safety = "never"
+clean = "none"
+note = "If huge, rebuild it from Indexing Options instead of deleting."
+
+[[rule]]
+id = "win.downloads"
+reclaimable = false
+category = "user"
+paths = ['%USERPROFILE%\Downloads']
+what = "User Downloads folder"
+safety = "manual"
+clean = "none"
+note = "User data. Look for old installers (.exe/.msi/.iso/.zip) and ask before deleting."
+
+# --- GPU shader caches ----------------------------------------------------------------------------
+
+[[rule]]
+id = "gpu.directx_shader_cache"
+category = "cache"
+paths = ['%LOCALAPPDATA%\D3DSCache']
+what = "DirectX shader cache"
+safety = "safe"
+clean = "contents"
+note = "Games recompile shaders on first launch (brief stutter)."
+
+[[rule]]
+id = "gpu.nvidia_shader_cache"
+category = "cache"
+paths = ['%LOCALAPPDATA%\NVIDIA\DXCache', '%LOCALAPPDATA%\NVIDIA\GLCache', '%LOCALAPPDATA%Low\NVIDIA\PerDriverVersion\DXCache']
+what = "NVIDIA shader cache"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "gpu.nvidia_installers"
+category = "cache"
+paths = ['%SystemDrive%\NVIDIA', '%ProgramData%\NVIDIA Corporation\Downloader']
+what = "Extracted / downloaded NVIDIA driver installers"
+safety = "safe"
+clean = "contents"
+admin = true
+
+[[rule]]
+id = "gpu.amd_cache"
+category = "cache"
+paths = ['%LOCALAPPDATA%\AMD\DxCache', '%LOCALAPPDATA%\AMD\DxcCache', '%LOCALAPPDATA%\AMD\VkCache', '%SystemDrive%\AMD']
+what = "AMD shader cache and extracted installers"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "games.steam_shadercache"
+category = "cache"
+paths = ['%ProgramFiles(x86)%\Steam\steamapps\shadercache']
+what = "Steam per-game shader pre-caches"
+safety = "safe"
+clean = "contents"
+
+# --- Browsers -------------------------------------------------------------------------------------
+
+[[rule]]
+id = "browser.chromium_cache"
+category = "browser"
+paths = [
+  '%LOCALAPPDATA%\Google\Chrome\User Data\*\Cache',
+  '%LOCALAPPDATA%\Google\Chrome\User Data\*\Code Cache',
+  '%LOCALAPPDATA%\Microsoft\Edge\User Data\*\Cache',
+  '%LOCALAPPDATA%\Microsoft\Edge\User Data\*\Code Cache',
+  '%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data\*\Cache',
+  '%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data\*\Code Cache',
+]
+what = "Chromium browser HTTP and code cache (Chrome, Edge, Brave)"
+safety = "safe"
+clean = "contents"
+note = "Close the browser first for a full clean; logins and history are untouched."
+
+[[rule]]
+id = "browser.firefox_cache"
+category = "browser"
+paths = ['%LOCALAPPDATA%\Mozilla\Firefox\Profiles\*\cache2']
+what = "Firefox HTTP cache"
+safety = "safe"
+clean = "contents"
+
+# --- Electron / desktop apps ----------------------------------------------------------------------
+
+[[rule]]
+id = "app.electron_cache"
+category = "cache"
+paths = [
+  '%APPDATA%\Code\Cache', '%APPDATA%\Code\CachedData', '%APPDATA%\Code\CachedExtensionVSIXs',
+  '%APPDATA%\discord\Cache', '%APPDATA%\discord\Code Cache',
+  '%APPDATA%\Slack\Cache', '%APPDATA%\Slack\Code Cache',
+  '%APPDATA%\Microsoft\Teams\Cache',
+]
+what = "Electron app caches (VS Code, Discord, Slack, Teams)"
+safety = "safe"
+clean = "contents"
+note = "Close the app first for a full clean."
+
+[[rule]]
+id = "app.spotify_cache"
+category = "cache"
+paths = ['%LOCALAPPDATA%\Spotify\Data', '%LOCALAPPDATA%\Packages\SpotifyAB.SpotifyMusic_*\LocalCache\Spotify\Data']
+what = "Spotify streaming cache"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "app.jetbrains_caches"
+category = "dev"
+paths = ['%LOCALAPPDATA%\JetBrains\*\caches', '%LOCALAPPDATA%\JetBrains\*\log']
+what = "JetBrains IDE caches and logs"
+safety = "safe"
+clean = "contents"
+note = "Indexes are rebuilt on next project open."
+
+# --- Developer toolchains -------------------------------------------------------------------------
+
+[[rule]]
+id = "dev.npm_cache"
+category = "dev"
+paths = ['%LOCALAPPDATA%\npm-cache']
+what = "npm package cache"
+safety = "safe"
+clean = "none"
+command = "npm cache clean --force"
+
+[[rule]]
+id = "dev.pnpm_store"
+category = "dev"
+paths = ['%LOCALAPPDATA%\pnpm\store', '%LOCALAPPDATA%\pnpm-store']
+what = "pnpm content-addressable store"
+safety = "safe"
+clean = "none"
+command = "pnpm store prune"
+note = "`prune` only removes packages no project references."
+
+[[rule]]
+id = "dev.yarn_cache"
+category = "dev"
+paths = ['%LOCALAPPDATA%\Yarn\Cache']
+what = "Yarn package cache"
+safety = "safe"
+clean = "none"
+command = "yarn cache clean"
+
+[[rule]]
+id = "dev.pip_cache"
+category = "dev"
+paths = ['%LOCALAPPDATA%\pip\cache']
+what = "pip download/wheel cache"
+safety = "safe"
+clean = "none"
+command = "pip cache purge"
+
+[[rule]]
+id = "dev.uv_cache"
+category = "dev"
+paths = ['%LOCALAPPDATA%\uv\cache']
+what = "uv package cache"
+safety = "safe"
+clean = "none"
+command = "uv cache clean"
+
+[[rule]]
+id = "dev.cargo_registry"
+category = "dev"
+paths = ['%USERPROFILE%\.cargo\registry']
+what = "Cargo crate downloads and extracted sources"
+safety = "caution"
+clean = "none"
+command = "cargo install cargo-cache; cargo cache --autoclean"
+note = "Re-downloaded on next build."
+
+[[rule]]
+id = "dev.go_cache"
+category = "dev"
+paths = ['%LOCALAPPDATA%\go-build', '%USERPROFILE%\go\pkg\mod']
+what = "Go build and module cache"
+safety = "safe"
+clean = "none"
+command = "go clean -cache -modcache"
+
+[[rule]]
+id = "dev.gradle_cache"
+category = "dev"
+paths = ['%USERPROFILE%\.gradle\caches', '%USERPROFILE%\.gradle\wrapper\dists']
+what = "Gradle dependency cache and wrapper distributions"
+safety = "safe"
+clean = "contents"
+
+[[rule]]
+id = "dev.maven_repo"
+category = "dev"
+paths = ['%USERPROFILE%\.m2\repository']
+what = "Maven local repository"
+safety = "caution"
+clean = "contents"
+note = "Re-downloaded on next build; may contain locally installed artifacts."
+
+[[rule]]
+id = "dev.nuget_cache"
+category = "dev"
+paths = ['%USERPROFILE%\.nuget\packages', '%LOCALAPPDATA%\NuGet\v3-cache']
+what = "NuGet package caches"
+safety = "safe"
+clean = "none"
+command = "dotnet nuget locals all --clear"
+
+[[rule]]
+id = "dev.playwright_browsers"
+category = "dev"
+paths = ['%LOCALAPPDATA%\ms-playwright']
+what = "Browsers downloaded by Playwright"
+safety = "caution"
+clean = "none"
+command = "npx playwright uninstall --all"
+note = "Each Playwright version pins its own browser build; old ones are dead weight."
+
+[[rule]]
+id = "dev.huggingface_cache"
+category = "dev"
+paths = ['%USERPROFILE%\.cache\huggingface']
+what = "Hugging Face models and datasets"
+safety = "caution"
+clean = "none"
+command = "huggingface-cli delete-cache"
+note = "Models can be many GB to re-download."
+
+[[rule]]
+id = "dev.ollama_models"
+reclaimable = false
+category = "dev"
+paths = ['%USERPROFILE%\.ollama\models']
+what = "Ollama local LLM models"
+safety = "manual"
+clean = "none"
+command = "ollama list; ollama rm <model>"
+
+[[rule]]
+id = "dev.docker_wsl"
+reclaimable = false
+category = "dev"
+paths = ['%LOCALAPPDATA%\Docker\wsl']
+what = "Docker Desktop WSL disk images"
+safety = "caution"
+clean = "none"
+command = "docker system prune -a"
+note = "Removes unused images, containers and build cache, NOT volumes (they hold databases and other data; list them with `docker volume ls` and ask). Space returns to Windows only after compacting the VHDX (Docker Desktop > Troubleshoot > Clean / Purge data)."
+
+[[rule]]
+id = "dev.wsl_distros"
+consent = "setting"
+reclaimable = false
+category = "dev"
+paths = ['%LOCALAPPDATA%\Packages\*\LocalState\ext4.vhdx', '%LOCALAPPDATA%\wsl\*\ext4.vhdx']
+what = "WSL distro virtual disk"
+safety = "manual"
+clean = "none"
+command = "wsl --manage <distro> --set-sparse true"
+note = "VHDX files grow but never shrink on their own. Sparse mode returns freed space to Windows."
+
+[[rule]]
+id = "dev.android_avd"
+consent = "user_data"
+reclaimable = false
+category = "dev"
+paths = ['%USERPROFILE%\.android\avd']
+what = "Android emulator images"
+safety = "manual"
+clean = "none"

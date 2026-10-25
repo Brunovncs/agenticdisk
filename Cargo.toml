@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/agenticdisk-core", "crates/agenticdisk-windows", "crates/agenticdisk"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,229 @@
+//! Output contract shared by every platform. Agents read this, so it stays small, stable and flat.
+
+use serde::{Deserialize, Serialize};
+
+use crate::size::Bytes;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// How dangerous it is to apply a fix. Agents should auto-apply only `Safe`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Safety {
+    /// Regenerated automatically; no user data, no behavior change.
+    Safe,
+    /// Works, but has a cost: re-download, rebuild, lost rollback, changed behavior.
+    Caution,
+    /// Needs a human decision (user data, choice between options).
+    Manual,
+    /// Do not touch: deleting breaks the system. Use the listed tool instead, if any.
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Area {
+    System,
+    Disk,
+    Cleanup,
+    Drivers,
+    Privacy,
+    Startup,
+    Apps,
+    Security,
+    Stability,
+}
+
+/// What a fix touches, which decides how explicit the user's consent must be. Ordered from
+/// "regenerates by itself" to "belongs to the user".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Consent {
+    /// Regenerable data (caches, temp). Costs at most a re-download or rebuild.
+    Cache,
+    /// A reversible setting (registry value, startup entry, service start type).
+    Setting,
+    /// Removes installed software, drivers or Windows features.
+    Software,
+    /// Removes the ability to roll back (Windows.old, update backups, hibernation).
+    Rollback,
+    /// Removes diagnostic evidence (crash dumps, logs) that may still be needed.
+    Evidence,
+    /// The user's own files. agenticdisk never deletes these itself.
+    UserData,
+}
+
+impl Consent {
+    /// Classes an agent may batch (`--actions safe`); the rest must be named one by one.
+    pub fn batchable(self) -> bool {
+        matches!(self, Consent::Cache | Consent::Setting)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fix {
+    pub safety: Safety,
+    pub consent: Consent,
+    /// Exact command to run (PowerShell on Windows, sh on Unix). Absent for manual fixes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// `agenticdisk clean <rule>` can apply this fix itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clean_rule: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Machine-executable form used by `plan` / `apply` (journaled, verified, undoable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub op: Option<crate::action::Op>,
+}
+
+impl Fix {
+    pub fn command(safety: Safety, command: impl Into<String>) -> Self {
+        Self {
+            safety,
+            consent: Consent::Setting,
+            command: Some(command.into()),
+            clean_rule: None,
+            admin: false,
+            note: None,
+            op: None,
+        }
+    }
+
+    pub fn manual(note: impl Into<String>) -> Self {
+        Self {
+            safety: Safety::Manual,
+            consent: Consent::Setting,
+            command: None,
+            clean_rule: None,
+            admin: false,
+            note: Some(note.into()),
+            op: None,
+        }
+    }
+
+    pub fn admin(mut self) -> Self {
+        self.admin = true;
+        self
+    }
+
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    pub fn consent(mut self, consent: Consent) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    pub fn op(mut self, op: crate::action::Op) -> Self {
+        self.op = Some(op);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Finding {
+    /// Stable id, e.g. `privacy.advertising_id`. Same check, same id, across runs and machines.
+    pub id: String,
+    pub area: Area,
+    pub severity: Severity,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub evidence: Vec<String>,
+    /// Space this fix would free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaim: Option<Bytes>,
+    /// Space the item occupies when the fix frees only part of it (or none), e.g. a VM disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<Bytes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<Fix>,
+}
+
+impl Finding {
+    pub fn new(id: impl Into<String>, area: Area, severity: Severity, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            area,
+            severity,
+            title: title.into(),
+            detail: None,
+            evidence: Vec::new(),
+            reclaim: None,
+            size: None,
+            fix: None,
+        }
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn evidence(mut self, evidence: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.evidence = evidence.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn reclaim(mut self, bytes: u64) -> Self {
+        self.reclaim = Some(Bytes(bytes));
+        self
+    }
+
+    pub fn size(mut self, bytes: u64) -> Self {
+        self.size = Some(Bytes(bytes));
+        self
+    }
+
+    /// `reclaim` when removing the item frees all of it, `size` otherwise.
+    pub fn space(self, bytes: u64, fully_reclaimable: bool) -> Self {
+        if fully_reclaimable { self.reclaim(bytes) } else { self.size(bytes) }
+    }
+
+    pub fn fix(mut self, fix: Fix) -> Self {
+        self.fix = Some(fix);
+        self
+    }
+}
+
+/// One collector's output: an inventory (`data`) plus what is worth acting on (`findings`).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Section {
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
+    /// Things the collector could not see (missing admin rights, access denied, timeouts).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind_spots: Vec<String>,
+    pub took_ms: u64,
+}
+
+impl Section {
+    pub fn sort_findings(&mut self) {
+        sort_findings(&mut self.findings);
+    }
+}
+
+pub fn sort_findings(findings: &mut [Finding]) {
+    findings.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| b.reclaim.or(b.size).unwrap_or_default().cmp(&a.reclaim.or(a.size).unwrap_or_default()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
