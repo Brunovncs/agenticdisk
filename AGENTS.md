@@ -2,6 +2,10 @@
 
 Playbook for an AI agent asked to "clean up / speed up / fix this PC". Read SAFETY.md once.
 
+Over MCP the commands are tools: `goals` = `pc_goals`, `plan` = `pc_plan`, `apply` = `pc_apply`
+(`confirmed: true` plays the role of `--yes`), `undo` = `pc_undo`, an area command = `pc_inspect`,
+`disk` = `pc_disk`, `explain` = `pc_explain`, `clean` (dry run only) = `pc_clean_preview`.
+
 ## The loop
 
 1. **Find out what the user wants.** Run `agenticdisk goals` and ask its `ask_the_user` question

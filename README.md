@@ -16,6 +16,43 @@ agenticdisk apply space-1a2b3c4d --actions a2,a5 --yes  # after the user agrees
 agenticdisk undo <journal>      # reverts the settings that run changed
 ```
 
+## Use it from your agent (MCP)
+
+Paste this into Claude Code, Cursor, Codex or any agent with a shell:
+
+```text
+Install agenticdisk as an MCP server. It lets you inspect this Windows PC (disk space, caches, drivers, startup apps, privacy settings, bloatware, security, crashes) and apply only the changes I approve. It needs Node.js 18+: check with `node --version`, and if it is missing, tell me instead of installing it.
+
+- Claude Code: run `claude mcp add agenticdisk --scope user -- cmd /c npx -y agenticdisk mcp` (on Windows, npx needs the `cmd /c` wrapper).
+- Other MCP clients (Claude Desktop, Cursor, VS Code, Windsurf, Codex...): add a server named "agenticdisk" with command "cmd" and args ["/c", "npx", "-y", "agenticdisk", "mcp"] to the client's MCP config (Claude Desktop: %APPDATA%\Claude\claude_desktop_config.json under "mcpServers"; Cursor: %USERPROFILE%\.cursor\mcp.json under "mcpServers"; VS Code: .vscode\mcp.json under "servers"; Codex: [mcp_servers.agenticdisk] in %USERPROFILE%\.codex\config.toml). Edit the file in place and keep every server already in it.
+- If you can't add MCP servers, use the CLI instead: `npx -y agenticdisk goals`, `npx -y agenticdisk plan <goal>` and the other commands print the same JSON.
+
+Check it works with `npx -y agenticdisk goals` (it prints JSON with 8 goals). A newly added MCP server usually loads only in a new session: if the pc_* tools are not available to you yet, tell me to restart you, and use the CLI meanwhile. Don't run anything as administrator unless I ask: it works without admin and reports what it could not see.
+
+Tell me in one line when it's ready, then ask me what I want to fix: more space, a faster PC, less tracking, removing bloat, a malware check, crashes, or gaming. Answer in the language of my request.
+```
+
+The server is the same binary (`agenticdisk mcp`, stdio): every tool runs the same code as the
+CLI command it mirrors. Tools: `pc_goals`, `pc_overview`, `pc_plan`, `pc_apply` (the only one that
+changes anything, in two steps), `pc_undo`, `pc_history`, `pc_inspect`, `pc_disk`, `pc_explain`,
+`pc_clean_preview`, `pc_rules`; prompt `fix_my_pc`; resources `agenticdisk://docs/agents` and
+`agenticdisk://docs/safety`.
+
+### Testing before the npm release
+
+```powershell
+cargo build --release
+# 1. The binary directly:
+claude mcp add agenticdisk-dev --scope user -- C:\path\to\agenticdisk\target\release\agenticdisk.exe mcp
+# 2. The npm package exactly as users get it (npx does not run bins from a local .tgz; npm exec does):
+cd npm; npm pack
+claude mcp add agenticdisk-dev --scope user -- cmd /c npm exec --yes --package=C:\path\to\agenticdisk\npm\agenticdisk-0.1.0.tgz -- agenticdisk mcp
+```
+
+CI also uploads `agenticdisk.exe` and the `.tgz` as artifacts on every push. To publish:
+`cargo build --release`, then `npm publish` in `npm/` (`prepack` copies the binary and refuses a
+version that differs from `Cargo.toml`).
+
 ## Why
 
 An agent with a shell can already poke at a PC. It does it slowly, burns tokens and makes the same
@@ -81,7 +118,8 @@ crates/
                          scanner, cleanup engine, goals, plan/apply/journal/undo
   agenticdisk-windows/   collectors: registry, WMI, Task Scheduler COM, WinVerifyTrust,
                          Event Log; kb/privacy.toml, kb/apps.toml
-  agenticdisk/           CLI and JSON envelope
+  agenticdisk/           CLI, JSON envelope and the MCP server (`mcp`)
+npm/                     launcher package that bundles the binary (`npx -y agenticdisk mcp`)
 ```
 
 Knowledge is data, not code: a new cache location is a `[[rule]]`, a new privacy setting a
@@ -105,7 +143,7 @@ computed only where it can change a verdict. `--trace` prints per-step timings.
 ## Roadmap
 
 1. NTFS MFT reader when elevated (cold full-disk scans in seconds).
-2. MCP server exposing the same commands.
+2. Publish to npm and the MCP Registry; code-sign the binary (unsigned executables trip SmartScreen and some antivirus heuristics).
 3. Restore point before system-wide changes; quarantine (Recycle Bin) for user-approved file removal.
 4. Linux and macOS collectors.
 

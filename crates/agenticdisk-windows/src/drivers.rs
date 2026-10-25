@@ -105,7 +105,8 @@ type InfVersion = (String, String, String);
 fn inf_version(path: &Path) -> Option<InfVersion> {
     let bytes = std::fs::read(path).ok()?;
     let text = if bytes.starts_with(&[0xFF, 0xFE]) {
-        let wide: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let wide: Vec<u16> = pairs.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&wide)
     } else {
         String::from_utf8_lossy(&bytes).into_owned()

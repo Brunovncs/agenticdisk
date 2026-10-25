@@ -2,8 +2,8 @@
 //! scheduled tasks. Built once per process and shared with the security collector.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agenticdisk_core::action::{Op, RegData, ps_literal};
 use agenticdisk_core::{Area, Consent, Finding, Fix, Safety, Section, Severity, trace};
@@ -219,9 +219,19 @@ fn build() -> Inventory {
     Inventory { items, blind_spots }
 }
 
-pub fn inventory() -> &'static Inventory {
-    static INVENTORY: OnceLock<Inventory> = OnceLock::new();
-    INVENTORY.get_or_init(build)
+/// Built once per command (startup and security share it), but never kept long: a long-running
+/// MCP server must see the change right after `apply` disables an entry.
+pub fn inventory() -> Arc<Inventory> {
+    static CACHE: Mutex<Option<(Instant, Arc<Inventory>)>> = Mutex::new(None);
+    let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((built, inv)) = slot.as_ref()
+        && built.elapsed() < Duration::from_secs(3)
+    {
+        return Arc::clone(inv);
+    }
+    let inv = Arc::new(build());
+    *slot = Some((Instant::now(), Arc::clone(&inv)));
+    inv
 }
 
 /// Same as Task Manager > Disable: reversible, nothing is deleted.

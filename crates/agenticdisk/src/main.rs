@@ -1,4 +1,5 @@
 mod collect;
+mod mcp;
 mod output;
 
 use std::io::{BufRead, IsTerminal, Write};
@@ -147,6 +148,8 @@ enum Cmd {
     Explain { path: PathBuf },
     /// Dump the space knowledge base (optionally one rule).
     Rules { id: Option<String> },
+    /// Run as a Model Context Protocol server over stdio (for Claude Code, Cursor, VS Code...).
+    Mcp,
 }
 
 #[cfg(windows)]
@@ -386,8 +389,13 @@ fn explain(kb: &'static Kb, raw: &std::path::Path) -> Value {
     })
 }
 
+fn kb() -> &'static Kb {
+    static KB: std::sync::OnceLock<Kb> = std::sync::OnceLock::new();
+    KB.get_or_init(Kb::load)
+}
+
 fn run(cli: Cli, started: Instant) -> anyhow::Result<Value> {
-    let kb: &'static Kb = Box::leak(Box::new(Kb::load()));
+    let kb = kb();
     let command = cli.command.unwrap_or(Cmd::Overview { only: Vec::new(), timeout: 30 });
     if cli.threads.is_none() {
         let root = match &command {
@@ -482,6 +490,7 @@ fn run(cli: Cli, started: Instant) -> anyhow::Result<Value> {
             Value::Object(m)
         }
         Cmd::Explain { path } => explain(kb, path),
+        Cmd::Mcp => anyhow::bail!("mcp is a server: run `agenticdisk mcp` from an MCP client"),
         Cmd::Rules { id } => {
             let rules: Vec<_> = kb.rules.iter().filter(|r| id.as_ref().is_none_or(|i| &r.id == i)).collect();
             json!({ "tool": "agenticdisk", "command": "rules", "count": rules.len(), "rules": rules })
@@ -516,6 +525,10 @@ fn main() {
     }
     if cli.trace {
         agenticdisk_core::trace::enable();
+    }
+    if matches!(cli.command, Some(Cmd::Mcp)) {
+        mcp::serve();
+        return;
     }
     let pretty = cli.pretty;
     let started = Instant::now();

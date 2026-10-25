@@ -23,8 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Version pinned in rust-toolchain.toml; keep both in sync.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -77,12 +79,37 @@ jobs:
 
           $all = & $exe apply $plan.plan --actions all | ConvertFrom-Json
           if (-not $all.error) { throw 'apply --actions all must be refused' }
+
+          # MCP handshake over stdio: initialize + tools/list, then stdin closes and the server must exit.
+          $requests = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+          )
+          $replies = $requests | & $exe mcp | ForEach-Object { $_ | ConvertFrom-Json }
+          if ($replies.Count -ne 2) { throw "mcp: expected 2 replies, got $($replies.Count)" }
+          if ($replies[0].result.serverInfo.name -ne 'agenticdisk') { throw 'mcp: bad initialize reply' }
+          if ($replies[1].result.tools.Count -lt 11) { throw 'mcp: tools missing' }
           'smoke test passed'
+
+      # The npm package must stay publishable: pack it (prepack stages the binary) and run it.
+      - name: npm package
+        shell: pwsh
+        working-directory: npm
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm pack
+          $tgz = (Get-ChildItem *.tgz | Select-Object -First 1).FullName
+          $goals = npm exec --yes --package=$tgz -- agenticdisk goals | ConvertFrom-Json
+          if ($goals.goals.Count -lt 8) { throw 'npm package: goals did not run' }
+          "packed $(Split-Path $tgz -Leaf)"
 
       - uses: actions/upload-artifact@v4
         with:
           name: agenticdisk-windows-x64
-          path: target/release/agenticdisk.exe
+          path: |
+            target/release/agenticdisk.exe
+            npm/*.tgz
           if-no-files-found: error
 
   linux:
@@ -91,8 +118,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.1
           components: clippy
 
       - uses: Swatinem/rust-cache@v2

@@ -1,0 +1,6 @@
+# Same compiler locally and in CI: a new stable release can add lints that fail `-D warnings`.
+# Bump deliberately (and fix the new lints in the same commit).
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu"]

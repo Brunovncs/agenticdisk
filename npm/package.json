@@ -1,0 +1,47 @@
+{
+  "name": "agenticdisk",
+  "version": "0.1.0",
+  "description": "PC diagnostics and safe cleanup built for AI agents: disk space, caches, drivers, privacy, startup, bloat, security and crashes as compact JSON. MCP server included.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agents",
+    "windows",
+    "disk-usage",
+    "cleanup",
+    "debloat",
+    "privacy",
+    "diagnostics"
+  ],
+  "license": "MIT",
+  "author": "Bruno Veronez",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Brunovncs/agenticdisk.git"
+  },
+  "mcpName": "io.github.Brunovncs/agenticdisk",
+  "bin": {
+    "agenticdisk": "bin/agenticdisk.js"
+  },
+  "files": [
+    "bin",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "stage": "node scripts/stage.mjs",
+    "prepack": "node scripts/stage.mjs"
+  }
+}
