@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::kb::{CleanMode, Kb, Rule, home_dir};
 use crate::model::{Area, Finding, Safety, Section};
-use crate::scan::{du, rule_fix, space_severity};
+use crate::scan::{du, du_unique, rule_fix, rule_fix_at, space_severity};
 use crate::size::Bytes;
 
 const MIN_REPORTED: u64 = 50 * 1024 * 1024;
@@ -112,14 +112,28 @@ pub fn section(kb: &Kb) -> Section {
         }
         let mut paths = m.paths.clone();
         paths.sort_unstable_by_key(|x| std::cmp::Reverse(x.1));
-        let mut finding = Finding::new(
-            format!("cleanup.{}", m.rule.id),
-            Area::Cleanup,
-            space_severity(total),
-            format!("{}: {}", m.rule.what, Bytes(total)),
-        )
-        .evidence(paths.iter().take(5).map(|(p, s)| format!("{} {}", Bytes(*s), p.display())))
-        .space(total, m.rule.reclaimable);
+        // A command that names `{path}` acts on one file (a virtual disk): one finding per file.
+        if m.rule.command.as_deref().is_some_and(|c| c.contains("{path}")) {
+            let each = paths.iter().filter(|(_, s)| *s >= MIN_REPORTED).enumerate();
+            findings.extend(each.map(|(n, (p, s))| {
+                let path = p.display().to_string();
+                let fix = rule_fix_at(m.rule, Some(&path)).expect("rule has a fix");
+                Finding::new(
+                    format!("cleanup.{}.{}", m.rule.id, n + 1),
+                    Area::Cleanup,
+                    space_severity(*s),
+                    &m.rule.what,
+                )
+                .path(path, None)
+                .space(*s, m.rule.reclaimable)
+                .fix(fix)
+            }));
+            continue;
+        }
+        let mut finding =
+            Finding::new(format!("cleanup.{}", m.rule.id), Area::Cleanup, space_severity(total), &m.rule.what)
+                .evidence(paths.iter().take(5).map(|(p, s)| format!("{} {}", Bytes(*s), p.display())))
+                .space(total, m.rule.reclaimable);
         if let Some(fix) = rule_fix(m.rule) {
             finding = finding.fix(fix);
         }
@@ -141,6 +155,10 @@ pub struct CleanItem {
     pub path: String,
     pub before: Bytes,
     pub freed: Bytes,
+    /// Left on purpose: newer than the rule's age window, or a name it keeps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
+    /// Not done: a refused path, or entries in use or access denied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
 }
@@ -195,6 +213,7 @@ pub fn clean(kb: &Kb, ids: &[String], apply: bool) -> CleanReport {
                         path: path.display().to_string(),
                         before: Bytes(0),
                         freed: Bytes(0),
+                        kept: None,
                         skipped: Some(reason),
                     });
                     continue;
@@ -212,20 +231,25 @@ pub fn clean(kb: &Kb, ids: &[String], apply: bool) -> CleanReport {
                 path: canonical.display().to_string(),
                 before: Bytes(before),
                 freed: Bytes(eligible_bytes),
-                skipped: (eligible_bytes < before).then(|| {
-                    format!(
-                        "{} kept (newer than {} days or protected name)",
-                        Bytes(before - eligible_bytes),
-                        rule.min_age_days
-                    )
+                kept: (eligible_bytes < before).then(|| {
+                    let why = match (rule.min_age_days, rule.keep.is_empty()) {
+                        (0, true) => "changed while measuring".to_string(),
+                        (0, false) => format!("kept by name: {}", rule.keep.join(", ")),
+                        (days, true) => format!("newer than {days} days"),
+                        (days, false) => format!("newer than {days} days or kept by name: {}", rule.keep.join(", ")),
+                    };
+                    format!("{} kept ({why})", Bytes(before - eligible_bytes))
                 }),
+                skipped: None,
             };
             if apply {
+                // Measured with hard links resolved: `freed` is what the disk got back.
+                let before = du_unique(&canonical);
                 let failures = remove_all(&targets);
-                let after = du(&canonical).0;
-                item.freed = Bytes(before.saturating_sub(after));
+                item.freed = Bytes(before.saturating_sub(du_unique(&canonical)));
                 if failures > 0 {
-                    item.skipped = Some(format!("{failures} entries in use or access denied; the rest was removed"));
+                    let entries = if failures == 1 { "entry" } else { "entries" };
+                    item.skipped = Some(format!("{failures} {entries} in use or access denied; the rest was removed"));
                 }
             }
             report.freed.0 += item.freed.0;
@@ -233,6 +257,48 @@ pub fn clean(kb: &Kb, ids: &[String], apply: bool) -> CleanReport {
         }
     }
     report
+}
+
+/// Re-checks at apply time that `path` is still what the plan saw: a build folder of `rule_id`
+/// (folder name, project marker next to it, required contents), not a link, not protected.
+pub fn check_build_folder(kb: &Kb, rule_id: &str, path: &Path) -> Result<PathBuf, String> {
+    let nr = kb
+        .name_rules
+        .iter()
+        .find(|nr| kb.rules[nr.rule].id == rule_id)
+        .ok_or_else(|| format!("{rule_id} is not a build-folder rule"))?;
+    let dir = guard(path)?;
+    if !dir.is_dir() {
+        return Err(format!("{} is not a folder", dir.display()));
+    }
+    let names = |d: Option<&Path>| -> Vec<String> {
+        d.and_then(|d| std::fs::read_dir(d).ok())
+            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default()
+    };
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let (parent_files, own_files) = (names(dir.parent()), names(Some(&dir)));
+    if !nr.matches_name(&name)
+        || !nr.parent_ok(parent_files.iter().map(String::as_str))
+        || !nr.contains_ok(own_files.iter().map(String::as_str))
+    {
+        return Err(format!("{} no longer looks like a {}", dir.display(), kb.rules[nr.rule].what));
+    }
+    Ok(dir)
+}
+
+/// Deletes a whole build folder after `check_build_folder`. Returns (freed bytes, entries that
+/// could not be removed: files a running build or editor holds open).
+pub fn remove_build_folder(kb: &Kb, rule_id: &str, path: &Path) -> Result<(u64, usize), String> {
+    let dir = check_build_folder(kb, rule_id, path)?;
+    let before = du_unique(&dir);
+    let targets = eligible(&dir, &[], Duration::ZERO);
+    let failures = remove_all(&targets);
+    if failures == 0 {
+        let _ = std::fs::remove_dir(&dir);
+    }
+    let after = if dir.exists() { du_unique(&dir) } else { 0 };
+    Ok((before.saturating_sub(after), failures))
 }
 
 /// Windows returns `\\?\C:\...` from canonicalize; strip it so paths compare and print normally.

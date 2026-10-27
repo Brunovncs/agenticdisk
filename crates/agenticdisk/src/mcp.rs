@@ -15,9 +15,15 @@ use crate::{Cli, run};
 const PROTOCOLS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "agenticdisk inspects this Windows PC and applies only changes the user approves. \
-Start with pc_goals (ask the user what they want fixed) or pc_overview. pc_plan builds numbered actions plus the questions to ask the user; \
-ask them, never answer them yourself. pc_apply is the only tool that changes anything: call it first without `confirmed` to get the exact `confirm` text, \
-show that text to the user word for word, and call again with confirmed=true only after they explicitly agree. \
+For any question about this PC, use these tools before shell commands: they are faster, read what a non-admin shell cannot, and know what is safe to delete. \
+Which tool: disk full / free space -> pc_plan(space) (includes build folders per project with idle days); slow PC -> pc_plan(speed); \
+blue screens, crashes, freezes -> pc_inspect(stability); privacy, telemetry, ads -> pc_plan(privacy); bloatware -> pc_plan(debloat); \
+malware or hijack worries -> pc_plan(security); 'what is this folder / can I delete it?' -> pc_explain(path); vague 'check my PC' -> pc_overview, then pc_plan for what matters. \
+Flow: pc_plan returns numbered actions and `questions`; ask the user those questions and let them choose, never answer them yourself. \
+Then pc_preview (read-only) returns `confirm` and a `token`: show `confirm` to the user word for word, \
+and call pc_apply(token) only after they say yes to it. pc_apply is the only tool that changes anything. Actions that come back as a script are for the user to review and run. \
+If the plan's `coverage` shows space it does not list, offer pc_disk on that drive. \
+If a tool returns an error, report it; do not redo the change with shell commands. \
 Personal files are never deleted. `blind_spots` mean 'not checked', not 'fine'. Answer in the user's language.";
 
 const AGENTS_MD: &str = include_str!("../../../AGENTS.md");
@@ -37,6 +43,16 @@ fn report_props() -> Value {
 fn with_report_props(mut props: Value) -> Value {
     if let (Value::Object(p), Value::Object(r)) = (&mut props, report_props()) {
         p.extend(r);
+    }
+    with_bytes(props)
+}
+
+fn with_bytes(mut props: Value) -> Value {
+    if let Value::Object(p) = &mut props {
+        p.insert(
+            "bytes".into(),
+            json!({ "type": "boolean", "description": "Sizes as exact byte integers instead of \"12.4G\" (for arithmetic)." }),
+        );
     }
     props
 }
@@ -70,7 +86,7 @@ fn tools() -> Value {
         tool(
             "pc_overview",
             "PC overview",
-            "Everything at once in ~2 s: ranked findings (most severe and largest first, each with an exact fix), per-area summaries, blind spots. Read-only.",
+            "Health check of every area at once in ~2 s: ranked findings (most severe and largest first), per-area summaries, blind spots. Read-only. For acting on a goal, pc_plan is more direct. Use max_findings (e.g. 15) to keep it short.",
             with_report_props(json!({
                 "only": { "type": "array", "items": { "type": "string", "enum": AREAS }, "description": "Limit to these areas." }
             })),
@@ -80,23 +96,32 @@ fn tools() -> Value {
         tool(
             "pc_plan",
             "Plan for a goal",
-            "Numbered actions for one goal, the questions to ask the user before choosing, advice only a human can act on, and blind spots. Saves the plan (valid 24 h); changes nothing.",
-            json!({
+            "Numbered actions for one goal, the questions to ask the user before choosing, advice only a human can act on, and blind spots. Actions of one kind (build folders, virtual disks) come as one group whose `items` hold the per-folder id, path, size and idle_days (`active` = changed in the last 2 weeks). The space goal also scans the user profile for build folders per project, which can take ~15 s the first time, and reports `coverage`: how much of the drive's used space the plan lists. Saves the plan (valid 24 h); changes nothing.",
+            with_bytes(json!({
                 "goal": { "type": "string", "enum": GOALS }
-            }),
+            })),
             &["goal"],
             true
         ),
         tool(
-            "pc_apply",
-            "Apply approved actions",
-            "The only tool that changes the PC. Step 1: call without `confirmed` to get `confirm`, the exact text of what will change, and show it to the user verbatim. Step 2: only after the user explicitly agrees, call again with confirmed=true. Never choose actions in consent classes software, rollback, evidence or user_data without the user naming them. `safe` selects only safe cache/setting actions. Writes are journaled; registry changes can be reverted with pc_undo. Admin-only and external steps come back as a script for the user to run.",
-            json!({
+            "pc_preview",
+            "Preview chosen actions",
+            "Read-only: the exact text of what applying these actions would change (`confirm`), current values and sizes, and a one-use `token` for pc_apply (valid 1 h). Show `confirm` to the user verbatim. Never choose actions in consent classes project, software, rollback, evidence or user_data without the user naming them; `safe` selects only safe cache/setting actions.",
+            with_bytes(json!({
                 "plan": { "type": "string", "description": "Plan id from pc_plan." },
-                "actions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Action ids such as a1, a4, or the single value `safe`." },
-                "confirmed": { "type": "boolean", "description": "Set only after the user agreed to the `confirm` text." }
-            }),
+                "actions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Action ids such as a1, a4, or the single value `safe`." }
+            })),
             &["plan", "actions"],
+            true
+        ),
+        tool(
+            "pc_apply",
+            "Apply previewed actions",
+            "The only tool that changes the PC: applies exactly what pc_preview showed for this token. Call it only after the user agreed to that `confirm` text. Writes are journaled; registry changes can be reverted with pc_undo. Admin-only and external steps come back as a script for the user to run.",
+            json!({
+                "token": { "type": "string", "description": "Token from pc_preview, after the user agreed to its `confirm` text." }
+            }),
+            &["token"],
             false
         ),
         tool(
@@ -120,7 +145,7 @@ fn tools() -> Value {
         tool(
             "pc_inspect",
             "Inspect one area",
-            "Full inventory and findings for one area: system, cleanup, drivers, privacy, startup, apps, security or stability.",
+            "Full inventory and findings for one area: system, cleanup, drivers, privacy, startup, apps, security or stability. stability = blue screens with stop codes and dump paths, unexpected shutdowns, hardware (WHEA) errors, boot service failures.",
             with_report_props(json!({
                 "area": { "type": "string", "enum": AREAS },
                 "full": { "type": "boolean", "description": "drivers only: also list every third-party driver (slower)." }
@@ -145,10 +170,10 @@ fn tools() -> Value {
         tool(
             "pc_explain",
             "What is this folder?",
-            "What a file or folder is, whether it is protected, and whether it is safe to delete. Use before touching anything unknown.",
-            json!({
+            "What a file or folder is, whether it is protected, whether it is safe to delete, its size, when anything inside last changed (idle_days), its largest children and the known locations inside it. Use it whenever the user asks about a specific path, and before touching anything unknown.",
+            with_bytes(json!({
                 "path": { "type": "string" }
-            }),
+            })),
             &["path"],
             true
         ),
@@ -201,6 +226,9 @@ fn is_id(s: &str) -> bool {
 /// Tool call -> command line. Client values go after `--` (positional) or into a flag's value.
 fn argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut v: Vec<String> = vec!["agenticdisk".into()];
+    if args.get("bytes").and_then(Value::as_bool) == Some(true) {
+        v.push("--bytes".into());
+    }
     let report_flags = |v: &mut Vec<String>| {
         if let Some(n) = args.get("max_findings").and_then(Value::as_u64) {
             v.extend(["--max-findings".into(), n.to_string()]);
@@ -226,18 +254,18 @@ fn argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
                 str_arg(args, "goal").filter(|g| GOALS.contains(g)).ok_or("goal must be one of the listed goals")?;
             v.extend(["plan".into(), "--".into(), goal.into()]);
         }
-        "pc_apply" => {
+        "pc_preview" => {
             let plan = str_arg(args, "plan").filter(|p| is_id(p)).ok_or("plan must be a plan id from pc_plan")?;
             let actions = list_arg(args, "actions");
             if actions.is_empty() {
                 return Err("actions must name at least one action id".into());
             }
             ensure(&actions, "action id", is_id)?;
-            v.extend(["apply".into(), "--actions".into(), actions.join(",")]);
-            if args.get("confirmed").and_then(Value::as_bool) == Some(true) {
-                v.push("--yes".into());
-            }
-            v.extend(["--".into(), plan.into()]);
+            v.extend(["preview".into(), "--actions".into(), actions.join(","), "--".into(), plan.into()]);
+        }
+        "pc_apply" => {
+            let token = str_arg(args, "token").filter(|t| is_id(t)).ok_or("token must be the token from pc_preview")?;
+            v.extend(["apply".into(), "--token".into(), token.into()]);
         }
         "pc_undo" => {
             let journal = str_arg(args, "journal").filter(|j| is_id(j)).ok_or("journal must be a journal id")?;
@@ -297,6 +325,7 @@ fn call_tool(params: &Value) -> Value {
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
     let outcome = argv(name, &args).and_then(|argv| {
         let cli = Cli::try_parse_from(&argv).map_err(|e| e.to_string())?;
+        agenticdisk_core::size::set_exact_bytes(cli.bytes);
         run(cli, Instant::now()).map_err(|e| e.to_string())
     });
     match outcome {
@@ -334,7 +363,7 @@ fn get_prompt(params: &Value) -> Result<Value, (i64, String)> {
         "Help me fix this Windows PC with the agenticdisk tools.\n\n{opening}\n\n\
 1. Ask me the plan's `questions` (they are grouped) and wait for my answers.\n\
 2. Propose the actions in plain words, grouped by what they touch, with how much space each frees.\n\
-3. Call pc_apply without `confirmed`, show me its `confirm` text exactly, and only after I say yes call it again with confirmed=true.\n\
+3. Call pc_preview with the actions I chose, show me its `confirm` text exactly, and only after I say yes call pc_apply with its token.\n\
 4. If it returns a script, tell me how to run it (as administrator when needed).\n\
 5. Re-check with pc_plan or pc_overview and tell me the before/after numbers.\n\n\
 Never delete personal files. Treat blind spots as 'not checked'. Answer in the language of my request."
@@ -387,6 +416,7 @@ fn handle(method: &str, params: &Value) -> Result<Value, (i64, String)> {
 
 /// Serves until stdin closes. Nothing but protocol messages is ever written to stdout.
 pub fn serve() {
+    crate::MCP_MODE.store(true, std::sync::atomic::Ordering::Relaxed);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -430,11 +460,20 @@ mod tests {
         assert_eq!(a[a.len() - 2..], ["--", "--yes"]);
         let cli = Cli::try_parse_from(&a).unwrap();
         assert!(matches!(cli.command, Some(crate::Cmd::Explain { .. })));
-        let a = argv("pc_apply", &json!({ "plan": "space-1234", "actions": ["a1", "a2"] })).unwrap();
-        assert!(!a.iter().any(|x| x == "--yes"), "no --yes without confirmed=true");
-        let a = argv("pc_apply", &json!({ "plan": "space-1234", "actions": ["a1"], "confirmed": true })).unwrap();
-        assert!(a.iter().any(|x| x == "--yes"));
-        assert!(argv("pc_apply", &json!({ "plan": "x;rm", "actions": ["a1"] })).is_err());
+        let a = argv("pc_preview", &json!({ "plan": "space-1234", "actions": ["a1", "a2"] })).unwrap();
+        assert!(!a.iter().any(|x| x == "--yes" || x == "--token"), "a preview can never apply");
+        assert!(argv("pc_preview", &json!({ "plan": "x;rm", "actions": ["a1"] })).is_err());
+        assert!(argv("pc_apply", &json!({ "token": "--yes" })).is_err());
+        assert!(argv("pc_apply", &json!({ "plan": "space-1234", "actions": ["a1"] })).is_err(), "apply needs a token");
+    }
+
+    #[test]
+    fn only_pc_apply_and_pc_undo_can_change_anything() {
+        for t in tools().as_array().unwrap() {
+            let name = t["name"].as_str().unwrap();
+            let read_only = t["annotations"]["readOnlyHint"] == true;
+            assert_eq!(read_only, !["pc_apply", "pc_undo"].contains(&name), "{name}");
+        }
     }
 
     #[test]
@@ -442,7 +481,9 @@ mod tests {
         let samples = [
             ("pc_goals", json!({})),
             ("pc_overview", json!({ "only": ["system"], "max_findings": 5, "min_severity": "low" })),
-            ("pc_plan", json!({ "goal": "space" })),
+            ("pc_plan", json!({ "goal": "space", "bytes": true })),
+            ("pc_preview", json!({ "plan": "space-1234", "actions": ["safe"] })),
+            ("pc_apply", json!({ "token": "t-0123456789abcdef" })),
             ("pc_undo", json!({ "journal": "space-1-2" })),
             ("pc_history", json!({})),
             ("pc_inspect", json!({ "area": "drivers", "full": true })),
@@ -453,6 +494,6 @@ mod tests {
             let a = argv(name, &args).unwrap();
             Cli::try_parse_from(&a).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
-        assert_eq!(tools().as_array().unwrap().len(), 11);
+        assert_eq!(tools().as_array().unwrap().len(), 12);
     }
 }

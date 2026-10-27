@@ -6,7 +6,9 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use agenticdisk_core::action::{Action, Applier, Journal, Op, Plan, Platform, confirmation_text};
+use agenticdisk_core::action::{
+    Action, Applier, Journal, Op, PREVIEW_TTL_SECS, Plan, Platform, Preview, confirmation_text,
+};
 use agenticdisk_core::goals::{self, GOALS, Goal};
 use agenticdisk_core::kb::normalize;
 use agenticdisk_core::scan::{ScanOptions, du};
@@ -85,12 +87,24 @@ enum Cmd {
         /// space | speed | privacy | debloat | security | stability | gaming | all
         goal: String,
     },
-    /// Apply actions from a plan. Without --yes it only shows exactly what would change.
-    Apply {
+    /// Show exactly what applying these actions would change, and a token to apply it. Read-only.
+    Preview {
         plan: String,
         /// Action ids (a1,a4) or `safe` (safe cache/setting actions only). Never a wildcard.
         #[arg(long, value_delimiter = ',', required = true)]
         actions: Vec<String>,
+    },
+    /// Apply what a preview showed (`--token`), or actions from a plan (`--actions`; without
+    /// --yes that only previews).
+    Apply {
+        #[arg(required_unless_present = "token")]
+        plan: Option<String>,
+        /// Action ids (a1,a4) or `safe` (safe cache/setting actions only). Never a wildcard.
+        #[arg(long, value_delimiter = ',', required_unless_present = "token")]
+        actions: Vec<String>,
+        /// Token from `preview`: applies exactly the actions it showed.
+        #[arg(long, conflicts_with_all = ["plan", "actions", "yes"])]
+        token: Option<String>,
         /// The user has seen the confirmation text and agreed.
         #[arg(long)]
         yes: bool,
@@ -208,6 +222,13 @@ fn default_root() -> PathBuf {
     }
 }
 
+static MCP_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `next` hints name what the caller can actually invoke: a command line, or an MCP tool.
+fn hint(cli: impl Into<String>, mcp: impl Into<String>) -> String {
+    if MCP_MODE.load(std::sync::atomic::Ordering::Relaxed) { mcp.into() } else { cli.into() }
+}
+
 fn admin_hint(next: &mut Vec<String>) {
     if !elevated() {
         next.push("Some checks are partial without admin (see blind_spots). Re-run from an elevated shell for the full picture.".into());
@@ -235,32 +256,63 @@ fn goals_listing() -> Value {
             "user_says": g.user_says,
             "covers": g.covers,
         })).collect::<Vec<_>>(),
-        "next": ["agenticdisk plan <goal> : numbered actions + questions for the user; nothing is changed"],
+        "next": [hint("agenticdisk plan <goal>", "pc_plan(goal)") + " : numbered actions + questions for the user; nothing is changed"],
     })
 }
 
 fn action_view(a: &Action, elevated: bool) -> Value {
     let runs = if matches!(a.op, Op::Script { .. }) || (a.admin && !elevated) { "script" } else { "agenticdisk" };
-    json!({
+    let mut v = json!({
         "id": a.id,
         "title": a.title,
         "consent": a.consent,
         "safety": a.safety,
-        "admin": a.admin,
-        "reclaim": a.reclaim,
         "runs": runs,
-        "what": a.describe(),
         "undo": a.undo,
-        "note": a.note,
-    })
+    });
+    if let Some(p) = &a.path {
+        v["path"] = p.clone().into();
+    }
+    if let Some(d) = a.idle_days {
+        v["idle_days"] = d.into();
+    }
+    if a.active() {
+        v["active"] = true.into();
+    }
+    if let (None, Some(s)) = (a.reclaim, a.size) {
+        v["size"] = json!(s);
+    }
+    // What agenticdisk itself changes is spelled out by apply's `confirm`; whatever ends up in a
+    // script is the user's to read before choosing.
+    match &a.op {
+        Op::Script { script } => v["script"] = script.clone().into(),
+        _ if runs == "script" => v["script"] = a.describe().into(),
+        _ => {}
+    }
+    if a.admin {
+        v["admin"] = true.into();
+    }
+    if let Some(r) = a.reclaim {
+        v["reclaim"] = json!(r);
+    }
+    if let Some(n) = &a.note {
+        v["note"] = n.clone().into();
+    }
+    v
 }
 
 fn plan(kb: &'static Kb, goal_name: &str, started: Instant) -> anyhow::Result<Value> {
     let goal =
         Goal::parse(goal_name).ok_or_else(|| anyhow::anyhow!("unknown goal `{goal_name}`; run `agenticdisk goals`"))?;
     let info = goal.info();
-    let sections = collect::run(collect::named(kb, info.collectors, false), Duration::from_secs(45));
-    let (findings, blind_spots, _) = output::merge(sections);
+    let mut collectors = collect::named(kb, info.collectors, false);
+    if matches!(goal, Goal::Space | Goal::All)
+        && let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    {
+        collectors.push(("build_folders", Box::new(move || scan::build_folders(kb, std::path::Path::new(&home)))));
+    }
+    let sections = collect::run(collectors, Duration::from_secs(45));
+    let (findings, blind_spots, data) = output::merge(sections);
     let built = goals::build(goal, &findings);
     built.plan.save()?;
     let elevated = elevated();
@@ -284,19 +336,91 @@ fn plan(kb: &'static Kb, goal_name: &str, started: Instant) -> anyhow::Result<Va
             "questions": built.questions.len(),
         }),
     );
-    m.insert("actions".into(), actions.iter().map(|a| action_view(a, elevated)).collect());
+    m.insert("actions".into(), group_actions(actions, elevated).into());
     m.insert("questions".into(), serde_json::to_value(&built.questions)?);
     m.insert("advice".into(), serde_json::to_value(&built.advice)?);
+    if matches!(goal, Goal::Space | Goal::All)
+        && let Some(c) = coverage(&data, actions, &built.advice)
+    {
+        m.insert("coverage".into(), c);
+    }
     m.insert("blind_spots".into(), blind_spots.into());
     m.insert(
         "next".into(),
         json!([
-            "Ask the user the `questions`, then decide the action ids together. Never pick consent classes software/rollback/evidence/user_data on your own.",
-            format!("agenticdisk apply {} --actions <ids|safe> : shows exactly what will change (no changes yet)", built.plan.id),
-            "Show the user the returned `confirm` text verbatim; only after they agree, re-run with --yes.",
+            "Ask the user the `questions`, then decide the action ids together. Never pick consent classes project/software/rollback/evidence/user_data on your own.".to_string(),
+            hint(
+                format!("agenticdisk preview {} --actions <ids|safe>", built.plan.id),
+                format!("pc_preview(plan=\"{}\", actions=[ids] or [\"safe\"])", built.plan.id)
+            ) + " : read-only; returns the exact `confirm` text and a token",
+            hint(
+                "Show the user `confirm` verbatim; only after they agree, run `agenticdisk apply --token <token>`.",
+                "Show the user `confirm` verbatim; only after they agree, call pc_apply(token)."
+            ),
         ]),
     );
     Ok(Value::Object(m))
+}
+
+/// Actions from one rule (build folders, virtual disks) differ only in id, path, size and age.
+/// They are listed once, as a group: what all of them share is said once, `items` hold the rest.
+fn group_actions(actions: &[Action], elevated: bool) -> Vec<Value> {
+    let mut groups: Vec<(&str, Vec<Value>)> = Vec::new();
+    for a in actions {
+        // `disk.build.dev.rust_target.3` -> `disk.build.dev.rust_target`
+        let key = match a.finding.rsplit_once('.') {
+            Some((head, n)) if n.chars().all(|c| c.is_ascii_digit()) => head,
+            _ => a.finding.as_str(),
+        };
+        let view = action_view(a, elevated);
+        match groups.iter_mut().find(|g| g.0 == key) {
+            Some(g) => g.1.push(view),
+            None => groups.push((key, vec![view])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, mut members)| {
+            if members.len() == 1 {
+                return members.pop().expect("one member");
+            }
+            let first = members[0].as_object().cloned().unwrap_or_default();
+            let shared: Vec<(String, Value)> =
+                first.into_iter().filter(|(k, v)| k != "id" && members.iter().all(|m| m.get(k) == Some(v))).collect();
+            for m in members.iter_mut().filter_map(Value::as_object_mut) {
+                for (k, _) in &shared {
+                    m.remove(k);
+                }
+            }
+            let mut group: serde_json::Map<String, Value> = shared.into_iter().collect();
+            group.insert("items".into(), members.into());
+            Value::Object(group)
+        })
+        .collect()
+}
+
+/// How much of the system drive's used space this plan accounts for. What it does not list is
+/// not reclaimable as far as the plan knows, but the user should see that it exists.
+fn coverage(data: &serde_json::Map<String, Value>, actions: &[Action], advice: &[goals::Advice]) -> Option<Value> {
+    let drive = default_root().display().to_string();
+    let volume = data
+        .get("system")?
+        .get("volumes")?
+        .as_array()?
+        .iter()
+        .find(|v| v["mount"].as_str().is_some_and(|m| m.eq_ignore_ascii_case(&drive)))?;
+    let bytes = |v: &Value| serde_json::from_value::<Bytes>(v.clone()).ok().map(|b| b.0);
+    let used = bytes(&volume["size"])?.saturating_sub(bytes(&volume["free"])?);
+    let listed: u64 = actions.iter().filter_map(|a| a.reclaim.or(a.size)).map(|b| b.0).sum::<u64>()
+        + advice.iter().filter_map(|a| a.size).map(|b| b.0).sum::<u64>();
+    let rest = used.saturating_sub(listed);
+    let mut c = json!({ "volume": drive, "used": Bytes(used), "listed_here": Bytes(listed.min(used)), "not_listed": Bytes(rest) });
+    if rest > used / 10 {
+        c["next"] = (hint(format!("agenticdisk disk {drive}"), format!("pc_disk(path={drive:?})"))
+            + " : where the rest is (games, installed apps, user files, Windows itself); a whole drive can take a minute the first time")
+            .into();
+    }
+    Some(c)
 }
 
 fn ask_interactively(text: &str) -> bool {
@@ -307,33 +431,69 @@ fn ask_interactively(text: &str) -> bool {
         && matches!(line.trim().to_lowercase().as_str(), "y" | "yes" | "s" | "sim")
 }
 
-fn apply(kb: &'static Kb, plan_id: &str, selectors: &[String], yes: bool, started: Instant) -> anyhow::Result<Value> {
+fn selected(plan_id: &str, selectors: &[String]) -> anyhow::Result<Plan> {
     let plan = Plan::load(plan_id).map_err(anyhow::Error::msg)?;
-    let elevated = elevated();
-    let chosen = plan.select(selectors, elevated).map_err(anyhow::Error::msg)?;
-    if chosen.is_empty() {
+    if plan.select(selectors, elevated()).map_err(anyhow::Error::msg)?.is_empty() {
         anyhow::bail!("no actions selected");
     }
+    Ok(plan)
+}
+
+/// Changes nothing: the exact confirmation text, current values and sizes, and the one-use token
+/// that lets `apply` run exactly these actions.
+fn preview(kb: &'static Kb, plan_id: &str, selectors: &[String], started: Instant) -> anyhow::Result<Value> {
+    let plan = selected(plan_id, selectors)?;
+    let chosen = plan.select(selectors, elevated()).map_err(anyhow::Error::msg)?;
+    let token = Preview::new(&plan, &chosen);
+    token.save()?;
+    let mut m = head("preview", started);
+    m.insert("plan".into(), plan.id.clone().into());
+    m.insert("status".into(), "awaiting_confirmation".into());
+    m.insert("confirm".into(), confirmation_text(&chosen).into());
+    m.insert("preview".into(), Applier { kb, platform: platform() }.preview(&chosen).into());
+    m.insert("token".into(), token.token.clone().into());
+    m.insert("expires_in_minutes".into(), (PREVIEW_TTL_SECS / 60).into());
+    m.insert(
+        "next".into(),
+        json!([format!(
+            "Show `confirm` to the user word for word. Only if they agree: {}",
+            hint(format!("agenticdisk apply --token {}", token.token), format!("pc_apply(token=\"{}\")", token.token))
+        )]),
+    );
+    m.insert("took_ms".into(), (started.elapsed().as_millis() as u64).into());
+    Ok(Value::Object(m))
+}
+
+fn apply_token(kb: &'static Kb, token: &str, started: Instant) -> anyhow::Result<Value> {
+    let shown = Preview::take(token).map_err(anyhow::Error::msg)?;
+    let plan = Plan::load(&shown.plan).map_err(anyhow::Error::msg)?;
+    let chosen = plan.select(&shown.actions, elevated()).map_err(anyhow::Error::msg)?;
+    apply(kb, &plan, &chosen, started)
+}
+
+/// `apply <plan> --actions`: with --yes (or a "y" at the terminal) it applies, otherwise it is a
+/// preview.
+fn apply_selected(
+    kb: &'static Kb,
+    plan_id: &str,
+    selectors: &[String],
+    yes: bool,
+    started: Instant,
+) -> anyhow::Result<Value> {
+    let plan = selected(plan_id, selectors)?;
+    let chosen = plan.select(selectors, elevated()).map_err(anyhow::Error::msg)?;
+    if yes || (std::io::stdin().is_terminal() && ask_interactively(&confirmation_text(&chosen))) {
+        apply(kb, &plan, &chosen, started)
+    } else {
+        preview(kb, plan_id, selectors, started)
+    }
+}
+
+fn apply(kb: &'static Kb, plan: &Plan, chosen: &[&Action], started: Instant) -> anyhow::Result<Value> {
     let applier = Applier { kb, platform: platform() };
-    let confirm = confirmation_text(&chosen);
-    let approved = yes || (std::io::stdin().is_terminal() && ask_interactively(&confirm));
     let mut m = head("apply", started);
     m.insert("plan".into(), plan.id.clone().into());
-    if !approved {
-        m.insert("status".into(), "awaiting_confirmation".into());
-        m.insert("confirm".into(), confirm.into());
-        m.insert("preview".into(), applier.preview(&chosen).into());
-        m.insert(
-            "next".into(),
-            json!([format!(
-                "Show `confirm` to the user word for word. Only if they agree: agenticdisk apply {} --actions {} --yes",
-                plan.id,
-                chosen.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(",")
-            )]),
-        );
-        return Ok(Value::Object(m));
-    }
-    let journal = applier.run(&plan, &chosen);
+    let journal = applier.run(plan, chosen);
     let freed: u64 = journal.outcomes.iter().filter_map(|o| o.freed).map(|b| b.0).sum();
     m.insert("status".into(), "applied".into());
     m.insert("journal".into(), journal.id.clone().into());
@@ -341,7 +501,10 @@ fn apply(kb: &'static Kb, plan_id: &str, selectors: &[String], yes: bool, starte
     m.insert("outcomes".into(), serde_json::to_value(&journal.outcomes)?);
     let mut next = Vec::new();
     if journal.outcomes.iter().any(|o| !o.registry.is_empty()) {
-        next.push(format!("agenticdisk undo {} : reverts the registry changes above", journal.id));
+        next.push(
+            hint(format!("agenticdisk undo {}", journal.id), format!("pc_undo(journal=\"{}\")", journal.id))
+                + " : reverts the registry changes above",
+        );
     }
     if let Some(script) = &journal.script {
         m.insert("script".into(), script.display().to_string().into());
@@ -351,9 +514,13 @@ fn apply(kb: &'static Kb, plan_id: &str, selectors: &[String], yes: bool, starte
             if chosen.iter().any(|a| a.admin) { " from an elevated (Run as administrator) terminal" } else { "" }
         ));
     }
-    next.push("Re-run `agenticdisk plan <goal>` or `agenticdisk` to verify the result.".into());
+    next.push(format!(
+        "Re-run {} to verify the result.",
+        hint("`agenticdisk plan <goal>`", "pc_plan for the same goal")
+    ));
     m.insert("next".into(), next.into());
     m.insert("disclaimer".into(), DISCLAIMER.into());
+    m.insert("took_ms".into(), (started.elapsed().as_millis() as u64).into());
     Ok(Value::Object(m))
 }
 
@@ -361,8 +528,18 @@ fn explain(kb: &'static Kb, raw: &std::path::Path) -> Value {
     let path = normalize(raw);
     let protected = cleanup::protected(&path);
     let explained = kb.explain(&path);
-    // A drive root or a top-level folder can take minutes to size; skip it.
-    let sized = (path.components().count() >= 3).then(|| du(&path));
+    // Known locations below this folder: "Docker" is unknown, but its WSL disk is a rule.
+    let inside: Vec<Value> = if explained.is_none() {
+        kb.rules
+            .iter()
+            .flat_map(|r| Kb::resolve(r).into_iter().map(move |p| (r, p)))
+            .filter(|(_, p)| p != &path && agenticdisk_core::kb::is_within(p, &path) && agenticdisk_core::kb::exists(p))
+            .take(8)
+            .map(|(r, p)| json!({ "path": p.display().to_string(), "rule": r.id, "what": r.what, "safety": r.safety }))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let verdict = if protected {
         "protected location (personal or system folder): agenticdisk never deletes it"
     } else {
@@ -371,22 +548,76 @@ fn explain(kb: &'static Kb, raw: &std::path::Path) -> Value {
             Some(Safety::Caution) => "known, removable with a cost (see note)",
             Some(Safety::Manual) => "known, user data or a choice: ask the user",
             Some(Safety::Never) => "known, do NOT delete: use the command instead",
-            None => "unknown to the knowledge base: inspect contents and ask the user",
+            None if !inside.is_empty() => "not a known location itself, but it contains known ones (see `inside`)",
+            None => "unknown to the knowledge base: look at `largest` and `idle_days`, then ask the user",
         }
     };
-    json!({
-        "tool": "agenticdisk",
-        "command": "explain",
-        "path": path.display().to_string(),
-        "exists": agenticdisk_core::kb::exists(&path),
-        "size": sized.map(|s| Bytes(s.0)),
-        "files": sized.map(|s| s.1),
-        "unreadable_dirs": sized.map(|s| s.2),
-        "protected": protected,
-        "rule": explained.as_ref().map(|(r, _)| serde_json::to_value(r).expect("rule serializes")),
-        "matched": explained.as_ref().map(|(_, p)| p.display().to_string()),
-        "verdict": verdict,
-    })
+    let mut m = head("explain", Instant::now());
+    m.remove("took_ms");
+    m.insert("path".into(), path.display().to_string().into());
+    m.insert("exists".into(), agenticdisk_core::kb::exists(&path).into());
+    m.insert("protected".into(), protected.into());
+    m.insert("verdict".into(), verdict.into());
+    if let Some((rule, matched)) = &explained {
+        m.insert("rule".into(), serde_json::to_value(rule).expect("rule serializes"));
+        if matched != &path {
+            m.insert("matched".into(), matched.display().to_string().into());
+        }
+    }
+    if !inside.is_empty() {
+        m.insert("inside".into(), inside.into());
+    }
+    // A drive root or a top-level folder can take minutes to size; skip it.
+    if path.components().count() >= 3 {
+        if path.is_dir() {
+            let opts = ScanOptions { top: 6, depth: 1, min_share: 1.0, largest_files: 3 };
+            let data = scan::scan(kb, &path, &opts).data;
+            for (key, from) in [("size", "/size"), ("files", "/files"), ("idle_days", "/tree/idle_days")] {
+                if let Some(v) = data.pointer(from) {
+                    m.insert(key.into(), v.clone());
+                }
+            }
+            let largest: Vec<Value> = data
+                .pointer("/tree/sub")
+                .and_then(Value::as_array)
+                .map(|sub| {
+                    sub.iter()
+                        .map(|n| {
+                            let mut n = n.clone();
+                            if let Some(name) = n["path"].as_str().and_then(|p| p.rsplit(['\\', '/']).next()) {
+                                n["path"] = name.to_string().into();
+                            }
+                            n
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !largest.is_empty() {
+                m.insert("largest".into(), largest.into());
+            }
+            let idle = data.pointer("/tree/idle_days").and_then(Value::as_u64);
+            if let (Some((rule, _)), Some(d)) = (&explained, idle)
+                && rule.dir_name.is_some()
+                && d < 14
+                && !protected
+            {
+                m.insert(
+                    "verdict".into(),
+                    format!("known and regenerable, but in active use (changed {d} days ago): a full rebuild follows, ask first").into(),
+                );
+            }
+            if let Some(n) = data.pointer("/inaccessible_dirs").filter(|n| n.as_u64() != Some(0)) {
+                m.insert("unreadable_dirs".into(), n.clone());
+            }
+        } else {
+            let (bytes, files, unreadable) = du(&path);
+            m.insert("size".into(), json!(Bytes(bytes)));
+            if unreadable > 0 || files == 0 {
+                m.insert("unreadable".into(), true.into());
+            }
+        }
+    }
+    Value::Object(m)
 }
 
 fn kb() -> &'static Kb {
@@ -415,22 +646,26 @@ fn run(cli: Cli, started: Instant) -> anyhow::Result<Value> {
                 if only.is_empty() { collect::AREAS.to_vec() } else { only.iter().map(String::as_str).collect() };
             let sections = collect::run(collect::named(kb, &names, false), Duration::from_secs(*timeout));
             let mut next = vec![
-                "agenticdisk goals : ask the user what they want to fix, then agenticdisk plan <goal>".to_string(),
-                format!(
-                    "agenticdisk disk {} : full space tree, largest files, dev caches across all projects",
-                    default_root().display()
-                ),
-                "agenticdisk explain <path> : what a folder is and whether it is safe to delete".into(),
+                hint("agenticdisk plan <goal>", "pc_plan(goal)")
+                    + " : numbered actions and the questions to ask the user (space also lists build folders per project)",
+                hint("agenticdisk explain <path>", "pc_explain(path)")
+                    + " : what a folder is, what is inside, and whether it is safe to delete",
             ];
             admin_hint(&mut next);
             envelope("overview", sections, view(Severity::Low), next, started)
         }
         Cmd::Goals => goals_listing(),
         Cmd::Plan { goal } => plan(kb, goal, started)?,
-        Cmd::Apply { plan: id, actions, yes } => apply(kb, id, actions, *yes, started)?,
+        Cmd::Preview { plan: id, actions } => preview(kb, id, actions, started)?,
+        Cmd::Apply { token: Some(token), .. } => apply_token(kb, token, started)?,
+        Cmd::Apply { plan, actions, yes, .. } => {
+            let id =
+                plan.as_deref().ok_or_else(|| anyhow::anyhow!("apply needs --token, or a plan id and --actions"))?;
+            apply_selected(kb, id, actions, *yes, started)?
+        }
         Cmd::Undo { journal } => {
-            let journal = Journal::load(journal).map_err(anyhow::Error::msg)?;
-            let results = Applier { kb, platform: platform() }.undo(&journal);
+            let mut journal = Journal::load(journal).map_err(anyhow::Error::msg)?;
+            let results = Applier { kb, platform: platform() }.undo(&mut journal).map_err(anyhow::Error::msg)?;
             let mut m = head("undo", started);
             m.insert("journal".into(), journal.id.into());
             m.insert("restored".into(), results.into());
@@ -447,15 +682,18 @@ fn run(cli: Cli, started: Instant) -> anyhow::Result<Value> {
             let opts = ScanOptions { top: *top, depth: *depth, min_share: *min_share, largest_files: *files };
             let section = scan::scan(kb, &root, &opts);
             let next = vec![
-                "agenticdisk disk <subfolder> --depth 2 : drill into one branch".into(),
-                "agenticdisk explain <path> : classify an unknown folder before deleting".into(),
-                "agenticdisk plan space : turn this into approved, journaled actions".into(),
+                hint("agenticdisk disk <subfolder> --depth 2", "pc_disk(path=<subfolder>, depth=2)")
+                    + " : drill into one branch",
+                hint("agenticdisk explain <path>", "pc_explain(path)")
+                    + " : classify an unknown folder before deleting",
+                hint("agenticdisk plan space", "pc_plan(goal=\"space\")")
+                    + " : turn this into approved, journaled actions",
             ];
             envelope("disk", vec![("disk", section)], view(Severity::Info), next, started)
         }
         Cmd::Cleanup => {
             let next =
-                vec!["agenticdisk plan space : numbered actions; or agenticdisk clean <rule> for a dry run".into()];
+                vec![hint("agenticdisk plan space", "pc_plan(goal=\"space\")") + " : numbered actions to approve"];
             envelope("cleanup", vec![("cleanup", cleanup::section(kb))], view(Severity::Info), next, started)
         }
         Cmd::Clean { rules, apply } => {
@@ -473,8 +711,11 @@ fn run(cli: Cli, started: Instant) -> anyhow::Result<Value> {
                         consent: kb.get(r).map(|x| x.consent()).unwrap_or(Consent::UserData),
                         admin: kb.get(r).is_some_and(|x| x.admin),
                         reclaim: None,
+                        size: None,
+                        path: None,
+                        idle_days: None,
                         note: None,
-                        undo: "not needed: regenerates on demand".into(),
+                        undo: "not needed: regenerates".into(),
                         op: Op::EmptyDir { rule: r.clone() },
                     })
                     .collect();
@@ -510,7 +751,9 @@ fn run(cli: Cli, started: Instant) -> anyhow::Result<Value> {
             let collector = collect::collector(kb, name, detail)
                 .ok_or_else(|| anyhow::anyhow!("`{name}` is not available on this platform yet"))?;
             let sections = collect::run(vec![collector], Duration::from_secs(120));
-            let mut next = vec!["agenticdisk plan <goal> : turn findings into approved, journaled actions".to_string()];
+            let mut next = vec![
+                hint("agenticdisk plan <goal>", "pc_plan(goal)") + " : turn findings into approved, journaled actions",
+            ];
             admin_hint(&mut next);
             envelope(name, sections, view(Severity::Info), next, started)
         }

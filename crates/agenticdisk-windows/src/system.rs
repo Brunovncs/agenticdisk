@@ -127,7 +127,7 @@ pub fn collect(detail: bool) -> Section {
             let severity = if free_pct < 5 || free < 5 * GIB { Severity::High } else { Severity::Medium };
             findings.push(
                 Finding::new(format!("system.low_space.{}", mount.trim_end_matches(['\\', ':']).to_lowercase()), Area::System, severity, format!("Volume {mount} is low on space: {} free of {} ({free_pct}%)", Bytes(free), Bytes(size)))
-                    .detail("Run `agenticdisk cleanup` for known reclaimable locations, then `agenticdisk disk <volume>` for the full picture."),
+                    .detail("Plan the space goal for known reclaimable locations and build folders; a disk scan of the volume shows the full picture."),
             );
         }
         if is_system && kind == "hdd" {

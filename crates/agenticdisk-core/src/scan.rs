@@ -80,6 +80,8 @@ struct Ctx<'a> {
     inaccessible: AtomicU64,
     links: AtomicU64,
     denied_samples: Mutex<Vec<String>>,
+    /// Folders not walked at all (`key` form).
+    exclude: HashSet<String>,
 }
 
 fn key(p: &Path) -> String {
@@ -87,7 +89,7 @@ fn key(p: &Path) -> String {
 }
 
 impl<'a> Ctx<'a> {
-    fn new(kb: &'a Kb) -> Self {
+    fn new(kb: &'a Kb, exclude: &[PathBuf]) -> Self {
         let mut static_dirs = HashMap::new();
         let mut static_files = HashMap::new();
         let mut static_file_parents = HashSet::new();
@@ -115,6 +117,7 @@ impl<'a> Ctx<'a> {
             inaccessible: AtomicU64::new(0),
             links: AtomicU64::new(0),
             denied_samples: Mutex::default(),
+            exclude: exclude.iter().map(|p| key(p)).collect(),
         }
     }
 
@@ -158,7 +161,10 @@ fn walk(ctx: &Ctx, path: PathBuf, candidate: Option<usize>, inside_match: bool) 
             continue;
         }
         if ft.is_dir() {
-            subdirs.push(entry.path());
+            let sub = entry.path();
+            if ctx.exclude.is_empty() || !ctx.exclude.contains(&key(&sub)) {
+                subdirs.push(sub);
+            }
             continue;
         }
         let meta = entry.metadata().ok();
@@ -316,10 +322,17 @@ fn prune(ctx: &Ctx, node: &Node, threshold: u64, depth: usize, opts: &ScanOption
     }
 }
 
-pub fn scan(kb: &Kb, root: &Path, opts: &ScanOptions) -> Section {
-    let started = Instant::now();
+/// Walks `root` once: the pruned tree, largest files, extensions, knowledge-base matches (the
+/// `hit_paths` largest paths of each rule).
+fn analyze(
+    kb: &Kb,
+    root: &Path,
+    opts: &ScanOptions,
+    exclude: &[PathBuf],
+    hit_paths: usize,
+) -> (ScanResult, Vec<String>) {
     let root = expand_env(&root.to_string_lossy()).map(PathBuf::from).unwrap_or_else(|| root.to_path_buf());
-    let ctx = Ctx::new(kb);
+    let ctx = Ctx::new(kb, exclude);
 
     let pool = crate::io::pool();
     let tree = {
@@ -368,7 +381,7 @@ pub fn scan(kb: &Kb, root: &Path, opts: &ScanOptions) -> Section {
                 note: r.note.clone(),
                 top: paths
                     .into_iter()
-                    .take(5)
+                    .take(hit_paths)
                     .map(|(p, s, newest)| PathSize {
                         path: p.display().to_string(),
                         size: Bytes(s),
@@ -379,33 +392,6 @@ pub fn scan(kb: &Kb, root: &Path, opts: &ScanOptions) -> Section {
         })
         .collect();
     kb_hits.sort_unstable_by_key(|x| std::cmp::Reverse(x.total));
-
-    let findings = kb_hits
-        .iter()
-        .filter(|h| matches!(h.safety, Safety::Safe | Safety::Caution) && h.total.0 >= 500 * 1024 * 1024)
-        .map(|h| {
-            let r = kb.get(&h.rule).expect("hit refers to a known rule");
-            let mut finding = Finding::new(
-                format!("disk.{}", h.rule),
-                Area::Disk,
-                space_severity(h.total.0),
-                if h.idle_90d.0 > 0 {
-                    format!("{} ({} in {} places, {} untouched for 90+ days)", h.what, h.total, h.count, h.idle_90d)
-                } else {
-                    format!("{} ({} in {} places)", h.what, h.total, h.count)
-                },
-            )
-            .evidence(h.top.iter().map(|p| match p.idle_days {
-                Some(d) => format!("{} {} (idle {d}d)", p.size, p.path),
-                None => format!("{} {}", p.size, p.path),
-            }))
-            .space(h.total.0, r.reclaimable);
-            if let Some(fix) = rule_fix(r) {
-                finding = finding.fix(fix);
-            }
-            finding
-        })
-        .collect();
 
     let inaccessible = ctx.inaccessible.load(Ordering::Relaxed);
     let mut blind_spots =
@@ -429,6 +415,41 @@ pub fn scan(kb: &Kb, root: &Path, opts: &ScanOptions) -> Section {
         inaccessible_dirs: inaccessible,
         skipped_links: ctx.links.load(Ordering::Relaxed),
     };
+    (result, blind_spots)
+}
+
+pub fn scan(kb: &Kb, root: &Path, opts: &ScanOptions) -> Section {
+    let started = Instant::now();
+    let (result, blind_spots) = analyze(kb, root, opts, &[], 5);
+    let kb_hits = &result.kb_hits;
+    let findings = kb_hits
+        .iter()
+        .filter(|h| matches!(h.safety, Safety::Safe | Safety::Caution) && h.total.0 >= 500 * 1024 * 1024)
+        .map(|h| {
+            let r = kb.get(&h.rule).expect("hit refers to a known rule");
+            let mut finding = Finding::new(
+                format!("disk.{}", h.rule),
+                Area::Disk,
+                space_severity(h.total.0),
+                if h.idle_90d.0 > 0 {
+                    format!("{} ({} in {} places, {} untouched for 90+ days)", h.what, h.total, h.count, h.idle_90d)
+                } else {
+                    format!("{} ({} in {} places)", h.what, h.total, h.count)
+                },
+            )
+            .evidence(h.top.iter().map(|p| match p.idle_days {
+                Some(d) => format!("{} {} (idle {d}d)", p.size, p.path),
+                None => format!("{} {}", p.size, p.path),
+            }))
+            .space(h.total.0, r.reclaimable);
+            let single = (h.count == 1).then(|| h.top[0].path.as_str());
+            if let Some(fix) = rule_fix_at(r, single) {
+                finding = finding.fix(fix);
+            }
+            finding
+        })
+        .collect();
+
     let mut section = Section {
         data: serde_json::to_value(result).expect("scan result serializes"),
         findings,
@@ -437,6 +458,70 @@ pub fn scan(kb: &Kb, root: &Path, opts: &ScanOptions) -> Section {
     };
     section.sort_findings();
     section
+}
+
+/// Build folders worth asking about (developer `dir_name` rules), one finding per folder so the
+/// user can keep the project they are working on. agenticdisk deletes the ones the user names,
+/// after re-checking each against its rule. AppData is skipped: projects do not live there, and
+/// what does (app runtimes, VS Code's private folders) is neither ours to delete nor readable.
+pub fn build_folders(kb: &Kb, root: &Path) -> Section {
+    const MIN: u64 = 500 * 1024 * 1024;
+    let started = Instant::now();
+    let opts = ScanOptions { top: 0, depth: 0, min_share: 100.0, largest_files: 0 };
+    // Every folder, not just the largest few: the idle ones the user forgot are the point.
+    let (result, mut blind_spots) = analyze(kb, root, &opts, &[root.join("AppData")], usize::MAX);
+    blind_spots.retain(|b| !b.starts_with("Sizes are logical"));
+    let mut findings = Vec::new();
+    for hit in result.kb_hits.iter().filter(|h| matches!(h.safety, Safety::Safe | Safety::Caution)) {
+        let Some(rule) = kb.get(&hit.rule) else { continue };
+        if rule.dir_name.is_none() {
+            continue;
+        }
+        let candidates: Vec<&PathSize> =
+            hit.top.iter().filter(|p| p.size.0 >= MIN && !crate::cleanup::protected(Path::new(&p.path))).collect();
+        // Re-measured with hard links resolved: a pnpm `node_modules` linked to its store frees
+        // almost nothing, and cargo's linked binaries must not be counted twice.
+        let freeable: Vec<PathSize> = crate::io::pool().install(|| {
+            candidates
+                .par_iter()
+                .map(|p| PathSize {
+                    path: p.path.clone(),
+                    size: Bytes(du_unique(Path::new(&p.path))),
+                    idle_days: p.idle_days,
+                })
+                .collect()
+        });
+        let kept = freeable.iter().filter(|p| p.size.0 >= MIN);
+        findings.extend(kept.enumerate().map(|(n, p)| build_folder_finding(rule, n + 1, p)));
+    }
+    let mut section =
+        Section { data: serde_json::Value::Null, findings, blind_spots, took_ms: started.elapsed().as_millis() as u64 };
+    section.sort_findings();
+    section
+}
+
+/// Title, note and fix are the same for every folder of a rule (so a plan can list them once);
+/// what differs per folder is structured: path, size, idle days.
+fn build_folder_finding(rule: &crate::kb::Rule, n: usize, p: &PathSize) -> Finding {
+    // Touched in the last two weeks: an active project pays a full rebuild.
+    let active = p.idle_days.is_none_or(|d| d < crate::action::ACTIVE_DAYS);
+    let note = match &rule.command {
+        Some(cmd) => Some(format!("Same effect as `{cmd}` in that project; its next build starts from scratch.")),
+        None => rule.note.clone(),
+    };
+    let mut fix = Fix::command(
+        if active { Safety::Caution } else { rule.safety },
+        format!("Remove-Item -LiteralPath {} -Recurse -Force", crate::action::ps_literal(&p.path)),
+    )
+    .consent(crate::model::Consent::Project)
+    .op(crate::action::Op::RemoveDir { rule: rule.id.clone(), path: p.path.clone() });
+    if let Some(note) = note {
+        fix = fix.note(note);
+    }
+    Finding::new(format!("disk.build.{}.{n}", rule.id), Area::Disk, space_severity(p.size.0), rule.what.clone())
+        .path(p.path.clone(), p.idle_days)
+        .reclaim(p.size.0)
+        .fix(fix)
 }
 
 /// Space alone never goes above Medium: High/Critical are for things that are broken or unsafe.
@@ -450,6 +535,12 @@ pub fn space_severity(bytes: u64) -> Severity {
 }
 
 pub fn rule_fix(rule: &crate::kb::Rule) -> Option<Fix> {
+    rule_fix_at(rule, None)
+}
+
+/// The rule's fix, with `{path}` in its command replaced by `path` (quoted for PowerShell). A
+/// per-file command without a single file to name is left to the plan, which has one per file.
+pub fn rule_fix_at(rule: &crate::kb::Rule, path: Option<&str>) -> Option<Fix> {
     let mut fix = match (&rule.clean, &rule.command) {
         (CleanMode::Contents, _) => {
             let mut fix = Fix::command(rule.safety, format!("agenticdisk clean {} --apply", rule.id))
@@ -457,13 +548,19 @@ pub fn rule_fix(rule: &crate::kb::Rule) -> Option<Fix> {
             fix.clean_rule = Some(rule.id.clone());
             fix
         }
+        (CleanMode::None, Some(cmd)) if cmd.contains("{path}") => match path {
+            Some(p) => Fix::command(rule.safety, cmd.replace("{path}", &crate::action::ps_literal(p))),
+            None => Fix::manual("One action per disk: run the space plan."),
+        },
         (CleanMode::None, Some(cmd)) => Fix::command(rule.safety, cmd.clone()),
         (CleanMode::None, None) => Fix::manual(rule.note.clone().unwrap_or_default()),
     };
     fix.safety = rule.safety;
     fix.consent = rule.consent();
     fix.admin = rule.admin;
-    fix.note = rule.note.clone();
+    if fix.command.is_some() || fix.note.is_none() {
+        fix.note = rule.note.clone();
+    }
     Some(fix)
 }
 
@@ -498,6 +595,116 @@ pub fn du(path: &Path) -> (u64, u64, u64) {
     (bytes + sub_bytes, files + sub_files, unreadable)
 }
 
+/// Bytes that deleting `path` actually frees. A file with several hard links (cargo links each
+/// binary into `deps`, pnpm links `node_modules` to its store) is counted once, and not at all
+/// when one of its links lives outside `path`. Slower than `du` on Windows (one handle per
+/// file), so it is kept for the numbers that promise space: build folders and apply results.
+pub fn du_unique(path: &Path) -> u64 {
+    let (mut bytes, mut linked) = unique_walk(path);
+    linked.sort_unstable_by_key(|l| l.0);
+    for group in linked.chunk_by(|a, b| a.0 == b.0) {
+        let (_, links, size) = group[0];
+        if group.len() as u64 >= links {
+            bytes += size;
+        }
+    }
+    bytes
+}
+
+/// (bytes of single-link files, (file id, link count, size) of every multi-link file).
+type Linked = Vec<((u64, u64), u64, u64)>;
+
+fn unique_walk(path: &Path) -> (u64, Linked) {
+    let file = |p: &Path, meta: &std::fs::Metadata| -> (u64, Linked) {
+        match link_info(p, meta) {
+            Some((id, links)) if links > 1 => (0, vec![(id, links, meta.len())]),
+            _ => (meta.len(), Vec::new()),
+        }
+    };
+    let Ok(read) = std::fs::read_dir(path) else {
+        return match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_file() => file(path, &m),
+            _ => (0, Vec::new()),
+        };
+    };
+    let mut bytes = 0;
+    let mut linked = Vec::new();
+    let mut subdirs = Vec::new();
+    for entry in read.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            subdirs.push(entry.path());
+        } else if let Ok(meta) = entry.metadata() {
+            let (b, l) = file(&entry.path(), &meta);
+            bytes += b;
+            linked.extend(l);
+        }
+    }
+    let (sub_bytes, sub_linked) = subdirs.into_par_iter().map(|d| unique_walk(&d)).reduce(
+        || (0, Vec::new()),
+        |mut a, b| {
+            a.1.extend(b.1);
+            (a.0 + b.0, a.1)
+        },
+    );
+    linked.extend(sub_linked);
+    (bytes + sub_bytes, linked)
+}
+
+/// ((volume, file index), hard link count).
+#[cfg(windows)]
+fn link_info(path: &Path, _: &std::fs::Metadata) -> Option<((u64, u64), u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        times: [u32; 6],
+        volume_serial: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(file: *mut std::ffi::c_void, info: *mut ByHandleFileInformation) -> i32;
+    }
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const SHARE_ALL: u32 = 0x7;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(SHARE_ALL)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let mut info = ByHandleFileInformation::default();
+    // SAFETY: a valid handle owned by `file`, and a correctly laid out BY_HANDLE_FILE_INFORMATION.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return None;
+    }
+    let index = (u64::from(info.index_high) << 32) | u64::from(info.index_low);
+    Some(((u64::from(info.volume_serial), index), u64::from(info.links)))
+}
+
+#[cfg(unix)]
+fn link_info(_: &Path, meta: &std::fs::Metadata) -> Option<((u64, u64), u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some(((meta.dev(), meta.ino()), meta.nlink()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn link_info(_: &Path, _: &std::fs::Metadata) -> Option<((u64, u64), u64)> {
+    None
+}
+
 /// Size of files that cannot be opened at all (pagefile.sys, hiberfil.sys), read from the parent
 /// directory listing.
 fn file_len_via_parent(path: &Path) -> Option<u64> {
@@ -508,4 +715,108 @@ fn file_len_via_parent(path: &Path) -> Option<u64> {
         .find(|e| e.file_name().eq_ignore_ascii_case(name))
         .and_then(|e| e.metadata().ok())
         .map(|m| m.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_build_folders_are_never_safe_and_paths_stay_quoted() {
+        let kb = Kb::load();
+        let rule = kb.get("dev.rust_target").expect("rule exists");
+        let folder =
+            |days| PathSize { path: "C:\\p\\it\u{2019}s\\target".into(), size: Bytes(2 << 30), idle_days: Some(days) };
+        let active = build_folder_finding(rule, 1, &folder(1));
+        let fix = active.fix.as_ref().unwrap();
+        assert_eq!(fix.safety, Safety::Caution);
+        assert_eq!(fix.consent, crate::model::Consent::Project);
+        assert!(matches!(&fix.op, Some(crate::action::Op::RemoveDir { path, .. }) if path.ends_with("target")));
+        assert!(fix.command.as_deref().unwrap().contains("it\u{2019}\u{2019}s"), "PowerShell smart quotes are doubled");
+        assert_eq!(active.id, "disk.build.dev.rust_target.1");
+        assert_eq!(active.idle_days, Some(1));
+        let idle = build_folder_finding(rule, 2, &folder(120));
+        assert_eq!(idle.fix.as_ref().unwrap().safety, rule.safety);
+        assert_eq!(idle.title, active.title, "per-folder details are fields, not title text");
+        assert_eq!(idle.fix.as_ref().unwrap().note, fix.note);
+    }
+
+    #[test]
+    fn hard_links_count_once_and_not_when_shared_outside() {
+        let root = std::env::temp_dir().join(format!("agenticdisk-links-test-{}", std::process::id()));
+        let (inside, outside) = (root.join("target"), root.join("store"));
+        std::fs::create_dir_all(inside.join("deps")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(inside.join("deps").join("app.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::hard_link(inside.join("deps").join("app.bin"), inside.join("app.bin")).unwrap();
+        std::fs::write(outside.join("pkg.js"), vec![0u8; 300]).unwrap();
+        std::fs::hard_link(outside.join("pkg.js"), inside.join("pkg.js")).unwrap();
+        std::fs::write(inside.join("own.txt"), vec![0u8; 20]).unwrap();
+        assert_eq!(du(&inside).0, 2320, "du counts every link");
+        assert_eq!(du_unique(&inside), 1020, "linked twice inside: once; linked from outside: freed by nothing");
+        assert_eq!(du_unique(&root), 1320);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn per_file_commands_name_their_file_quoted() {
+        let kb = Kb::load();
+        for rule in kb.rules.iter().filter(|r| r.command.as_deref().is_some_and(|c| c.contains("{path}"))) {
+            assert!(rule.clean == CleanMode::None && !rule.paths.is_empty(), "{}", rule.id);
+            let fix = rule_fix_at(rule, Some("C:\\it's\\ext4.vhdx")).unwrap();
+            let cmd = fix.command.unwrap();
+            assert!(cmd.contains("'C:\\it''s\\ext4.vhdx'") && !cmd.contains("{path}"), "{cmd}");
+            assert!(rule_fix(rule).unwrap().command.is_none(), "{}: no file, no command", rule.id);
+        }
+    }
+
+    #[test]
+    fn every_build_folder_is_listed_not_just_the_largest_five() {
+        let root = std::env::temp_dir().join(format!("agenticdisk-many-test-{}", std::process::id()));
+        for n in 0..7 {
+            let project = root.join(format!("p{n}"));
+            std::fs::create_dir_all(project.join("target")).unwrap();
+            std::fs::write(project.join("Cargo.toml"), b"").unwrap();
+            std::fs::write(project.join("target").join("big.bin"), vec![0u8; 1 << 20]).unwrap();
+        }
+        let kb = Kb::load();
+        let opts = ScanOptions { top: 0, depth: 0, min_share: 100.0, largest_files: 0 };
+        let listed = |limit| {
+            let (result, _) = analyze(&kb, &root, &opts, &[], limit);
+            result.kb_hits.iter().find(|h| h.rule == "dev.rust_target").map(|h| h.top.len()).unwrap_or(0)
+        };
+        assert_eq!((listed(5), listed(usize::MAX)), (5, 7));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_folders_skip_excluded_trees() {
+        let root = std::env::temp_dir().join(format!("agenticdisk-exclude-test-{}", std::process::id()));
+        for (parent, project) in [("code", "app"), ("AppData", "tool")] {
+            let dir = root.join(parent).join(project);
+            std::fs::create_dir_all(dir.join("target")).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), b"").unwrap();
+            std::fs::write(dir.join("target").join("big.bin"), vec![0u8; 2 << 20]).unwrap();
+        }
+        let kb = Kb::load();
+        let opts = ScanOptions { top: 0, depth: 0, min_share: 100.0, largest_files: 0 };
+        let (result, _) = analyze(&kb, &root, &opts, &[root.join("AppData")], usize::MAX);
+        let hit = result.kb_hits.iter().find(|h| h.rule == "dev.rust_target").expect("the project's target is found");
+        assert_eq!(
+            hit.count,
+            1,
+            "the one under AppData is not walked: {:?}",
+            hit.top.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
+        let rule = kb.get("dev.rust_target").unwrap();
+        let project = root.join("code").join("app");
+        let target = project.join("target");
+        assert!(crate::cleanup::check_build_folder(&kb, &rule.id, &target).is_ok());
+        std::fs::remove_file(project.join("Cargo.toml")).unwrap();
+        assert!(
+            crate::cleanup::check_build_folder(&kb, &rule.id, &target).is_err(),
+            "without its project marker it is no longer a build folder"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

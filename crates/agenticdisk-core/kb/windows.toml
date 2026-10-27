@@ -186,6 +186,7 @@ what = "Thumbnail and icon cache"
 safety = "safe"
 clean = "contents"
 note = "Rebuilt on demand; Explorer locks the live files, those are skipped."
+keep = ['*.json', '*.etl']
 
 [[rule]]
 id = "win.search_index"
@@ -362,21 +363,33 @@ command = "uv cache clean"
 [[rule]]
 id = "dev.cargo_registry"
 category = "dev"
-paths = ['%USERPROFILE%\.cargo\registry']
-what = "Cargo crate downloads and extracted sources"
+paths = [
+  '%USERPROFILE%\.cargo\registry\cache', '%USERPROFILE%\.cargo\registry\src',
+  '%USERPROFILE%\.cargo\git\checkouts', '%USERPROFILE%\.cargo\git\db',
+]
+what = "Cargo crate downloads, extracted sources and git checkouts"
 safety = "caution"
-clean = "none"
-command = "cargo install cargo-cache; cargo cache --autoclean"
-note = "Re-downloaded on next build."
+clean = "contents"
+note = "Re-downloaded on the next build, and each project recompiles its dependencies once. The registry index is kept."
 
 [[rule]]
-id = "dev.go_cache"
+id = "dev.go_build_cache"
 category = "dev"
-paths = ['%LOCALAPPDATA%\go-build', '%USERPROFILE%\go\pkg\mod']
-what = "Go build and module cache"
+paths = ['%LOCALAPPDATA%\go-build']
+what = "Go build cache"
 safety = "safe"
+clean = "contents"
+note = "Compiled packages; rebuilt locally on the next build, nothing is downloaded."
+
+[[rule]]
+id = "dev.go_modcache"
+category = "dev"
+paths = ['%USERPROFILE%\go\pkg\mod']
+what = "Go module cache"
+safety = "caution"
 clean = "none"
-command = "go clean -cache -modcache"
+command = "go clean -modcache"
+note = "Every module is re-downloaded on the next build; private modules (GOPRIVATE) need git credentials again. Its files are read-only, hence the command."
 
 [[rule]]
 id = "dev.gradle_cache"
@@ -418,11 +431,11 @@ note = "Each Playwright version pins its own browser build; old ones are dead we
 id = "dev.huggingface_cache"
 category = "dev"
 paths = ['%USERPROFILE%\.cache\huggingface']
+keep = ['token', 'stored_tokens', 'accelerate']
 what = "Hugging Face models and datasets"
 safety = "caution"
-clean = "none"
-command = "huggingface-cli delete-cache"
-note = "Models can be many GB to re-download."
+clean = "contents"
+note = "Deletes every downloaded model and dataset (many GB to re-download when next used); the login token and accelerate config are kept. To choose model by model the user can run `huggingface-cli delete-cache` (interactive)."
 
 [[rule]]
 id = "dev.ollama_models"
@@ -434,16 +447,20 @@ safety = "manual"
 clean = "none"
 command = "ollama list; ollama rm <model>"
 
+# Virtual disks (VHDX) grow but never shrink on their own. `{path}` in a command is replaced by the
+# disk's path (quoted), one finding per disk. Compacting needs WSL stopped and an admin shell.
+
 [[rule]]
 id = "dev.docker_wsl"
 reclaimable = false
 category = "dev"
-paths = ['%LOCALAPPDATA%\Docker\wsl']
-what = "Docker Desktop WSL disk images"
+paths = ['%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx', '%LOCALAPPDATA%\Docker\wsl\data\ext4.vhdx']
+what = "Docker Desktop data disk (images, containers, build cache, volumes)"
 safety = "caution"
 clean = "none"
-command = "docker system prune -a"
-note = "Removes unused images, containers and build cache, NOT volumes (they hold databases and other data; list them with `docker volume ls` and ask). Space returns to Windows only after compacting the VHDX (Docker Desktop > Troubleshoot > Clean / Purge data)."
+admin = true
+command = '$vhd = {path}; docker system prune -a -f; Write-Host "Now quit Docker Desktop (tray icon > Quit Docker Desktop)..."; while (Get-Process "Docker Desktop", "com.docker.backend" -ErrorAction SilentlyContinue) { Start-Sleep 2 }; wsl --shutdown; $dp = New-TemporaryFile; Set-Content -LiteralPath $dp -Value "select vdisk file=`"$vhd`"", "attach vdisk readonly", "compact vdisk", "detach vdisk"; diskpart /s $dp; Remove-Item -LiteralPath $dp'
+note = "Prunes unused images, containers and build cache, NOT volumes (they hold databases; list them with `docker volume ls` and ask), waits for Docker Desktop to be quit, then compacts the disk so the space returns to Windows. Never suggest Troubleshoot > Clean / Purge data: it deletes every image, container AND volume."
 
 [[rule]]
 id = "dev.wsl_distros"
@@ -452,10 +469,11 @@ reclaimable = false
 category = "dev"
 paths = ['%LOCALAPPDATA%\Packages\*\LocalState\ext4.vhdx', '%LOCALAPPDATA%\wsl\*\ext4.vhdx']
 what = "WSL distro virtual disk"
-safety = "manual"
+safety = "caution"
 clean = "none"
-command = "wsl --manage <distro> --set-sparse true"
-note = "VHDX files grow but never shrink on their own. Sparse mode returns freed space to Windows."
+admin = true
+command = '$vhd = {path}; wsl --shutdown; $dp = New-TemporaryFile; Set-Content -LiteralPath $dp -Value "select vdisk file=`"$vhd`"", "attach vdisk readonly", "compact vdisk", "detach vdisk"; diskpart /s $dp; Remove-Item -LiteralPath $dp'
+note = "Stops WSL and compacts the disk so space freed inside the distro returns to Windows. Nothing inside the distro is deleted."
 
 [[rule]]
 id = "dev.android_avd"

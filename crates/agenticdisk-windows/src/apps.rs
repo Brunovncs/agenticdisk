@@ -237,7 +237,7 @@ pub fn collect(detail: bool) -> Section {
                 Severity::Info,
                 format!("{} preinstalled apps that some people use", optional.len()),
             )
-            .detail("Ask the user which ones they use before removing; each has its own action in `agenticdisk plan debloat`.")
+            .detail("Ask the user which ones they use before removing; each has its own action in the debloat plan.")
             .evidence(optional.iter().map(|m| format!("{} ({})", m.name, m.what))),
         );
         for m in &optional {

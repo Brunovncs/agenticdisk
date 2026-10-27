@@ -7,20 +7,26 @@ hurt them. Reading is broad; writing is narrow, explicit and auditable.
 
 1. **Read commands never change anything.** `overview`, `goals`, `plan`, `disk`, `cleanup`,
    `system`, `drivers`, `privacy`, `startup`, `apps`, `security`, `stability`, `explain`, `rules`,
-   `history` and `apply` without `--yes` only read. (`plan` saves the plan file it prints;
-   `apply` writes its journal.)
-2. **Nothing changes without an explicit, specific approval.** `apply` needs the exact action ids
-   *and* `--yes` (or an interactive "y" in a terminal). There is no "apply everything": `all` is
-   rejected, and the `safe` shorthand only covers regenerable caches and reversible settings.
+   `history`, `preview` and `apply` without `--yes` only read. (`plan` saves the plan file it
+   prints, `preview` its token; `apply` writes its journal.)
+2. **Nothing changes without an explicit, specific approval.** `preview` shows the exact text of
+   what will change and returns a one-use token (valid 1 hour); `apply --token` runs exactly those
+   actions and nothing else. Over MCP that is the only way: `pc_preview` is read-only and
+   `pc_apply` takes nothing but the token. From a terminal, `apply <plan> --actions` also works
+   with `--yes` or an interactive "y". There is no "apply everything": `all` is rejected, and the
+   `safe` shorthand only covers regenerable caches and reversible settings.
 3. **Personal files are never deleted by agenticdisk.** Actions in the `user_data` consent class
    are refused by the engine itself. These folders can never be the target of a deletion, however
    a rule, environment variable or `..` resolves: the user profile, Documents, Desktop, Pictures,
    Videos, Music, Downloads, OneDrive, AppData (and Local/Roaming/LocalLow), C:\Users, Windows,
    ProgramData, Program Files and Program Files (x86). Nothing *inside* WinSxS, Installer,
    System32, SysWOW64, `.ssh` or a `.git` folder can ever be deleted.
-4. **Only two kinds of writes are performed by agenticdisk itself:**
+4. **Only three kinds of writes are performed by agenticdisk itself:**
    - emptying knowledge-base cache folders (rules marked `clean = "contents"`), skipping anything
      modified in the rule's age window (7 days for temp folders) and names it must keep;
+   - deleting a build folder the user named (`target`, `node_modules`, a venv...). At apply time
+     it must still match its rule, project marker included (`Cargo.toml` next to `target`,
+     `package.json` next to `node_modules`), or it is refused;
    - setting registry values that appear in the knowledge base, plus Task Manager's
      StartupApproved entries. Every other key is refused.
 5. **Everything else becomes a script the user reads and runs**: uninstalls, DISM, pnputil, driver
@@ -42,6 +48,7 @@ hurt them. Reading is broad; writing is narrow, explicit and auditable.
 |---|---|---|
 | `cache` | Regenerable data (caches, temp). Costs at most a re-download or rebuild. | yes, when safety is `safe` |
 | `setting` | A reversible setting (registry value, startup entry). | yes, when safety is `safe` |
+| `project` | A build folder of one of the user's projects (`active` = changed in the last 2 weeks). | no, the user picks the projects |
 | `software` | Uninstalls apps, drivers or features. | no, name each id |
 | `rollback` | Removes the ability to roll back (Windows.old, hibernation, update backups). | no |
 | `evidence` | Crash dumps and logs that may still be needed. | no |

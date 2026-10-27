@@ -1,7 +1,8 @@
 //! The only write path in agenticdisk.
 //!
 //! Reading is broad; writing is narrow and auditable:
-//! - agenticdisk itself only (a) empties knowledge-base cache folders and (b) writes allow-listed
+//! - agenticdisk itself only (a) empties knowledge-base cache folders, (b) deletes build folders
+//!   the user named, re-checked against their rule at apply time, and (c) writes allow-listed
 //!   registry values, each journaled with the prior state and verified by re-reading;
 //! - everything else (uninstalls, DISM, pnputil, admin steps when not elevated) is exported as a
 //!   PowerShell script the user reads and runs, one confirmation per step;
@@ -46,6 +47,9 @@ pub struct RegWrite {
 pub enum Op {
     /// Empty a knowledge-base location (`clean = "contents"`), re-resolved and re-guarded at apply time.
     EmptyDir { rule: String },
+    /// Delete one build folder (`target`, `node_modules`...) found by a `dir_name` rule. At apply
+    /// time the folder must still match that rule (name and project marker), or it is refused.
+    RemoveDir { rule: String, path: String },
     /// Set registry values under one key. Only keys/values the platform allow-lists.
     SetRegistry { key: String, values: Vec<RegWrite> },
     /// Never executed by agenticdisk: exported to a script the user reviews and runs.
@@ -82,6 +86,13 @@ pub struct Action {
     pub admin: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reclaim: Option<Bytes>,
+    /// What the item occupies when the action frees only part of it (or nothing directly).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub size: Option<Bytes>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub idle_days: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub note: Option<String>,
     /// How to reverse it: "agenticdisk undo <journal>", "regenerates", or a hint.
@@ -89,16 +100,20 @@ pub struct Action {
     pub op: Op,
 }
 
+/// Touched in the last two weeks: someone is working on it.
+pub const ACTIVE_DAYS: u64 = 14;
+
 impl Action {
     pub fn from_finding(id: String, finding: &Finding) -> Option<Self> {
         let fix = finding.fix.as_ref()?;
         let op = fix.op.clone().or_else(|| fix.command.clone().map(|script| Op::Script { script }))?;
         let undo = match &op {
-            Op::EmptyDir { .. } => "not needed: regenerates on demand".to_string(),
-            Op::SetRegistry { .. } => "agenticdisk undo <journal id> (prior values are journaled)".to_string(),
+            Op::EmptyDir { .. } => "not needed: regenerates".to_string(),
+            Op::RemoveDir { .. } => "not needed: the project's next build recreates it".to_string(),
+            Op::SetRegistry { .. } => "undo with the journal id".to_string(),
             Op::Script { .. } => match fix.consent {
-                Consent::Software => "reinstall (Store / winget / vendor installer)".to_string(),
-                Consent::Rollback | Consent::Evidence | Consent::Cache => "none: cannot be undone".to_string(),
+                Consent::Software => "reinstall".to_string(),
+                Consent::Rollback | Consent::Evidence | Consent::Cache => "none".to_string(),
                 _ => "see note".to_string(),
             },
         };
@@ -110,15 +125,25 @@ impl Action {
             consent: fix.consent,
             admin: fix.admin,
             reclaim: finding.reclaim,
+            size: finding.size,
+            path: finding.path.clone(),
+            idle_days: finding.idle_days,
             note: fix.note.clone(),
             undo,
             op,
         })
     }
 
+    /// A build folder changed in the last two weeks (or of unknown age): its project is being
+    /// worked on, and removing it costs a full rebuild today.
+    pub fn active(&self) -> bool {
+        matches!(self.op, Op::RemoveDir { .. }) && self.idle_days.is_none_or(|d| d < ACTIVE_DAYS)
+    }
+
     pub fn describe(&self) -> String {
         match &self.op {
             Op::EmptyDir { rule } => format!("delete the contents of the folders of rule `{rule}`"),
+            Op::RemoveDir { path, .. } => format!("delete the folder {path}"),
             Op::SetRegistry { key, values } => format!(
                 "set {}",
                 values.iter().map(|v| format!("{key}\\{} = {}", v.name, v.data)).collect::<Vec<_>>().join("; ")
@@ -149,7 +174,8 @@ fn write_json(dir: &str, name: &str, value: &impl Serialize) -> std::io::Result<
     let dir = data_dir().join(dir);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{name}.json"));
-    std::fs::write(&path, serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?)?;
+    let json = crate::size::with_exact_bytes(|| serde_json::to_vec_pretty(value)).map_err(std::io::Error::other)?;
+    std::fs::write(&path, json)?;
     Ok(path)
 }
 
@@ -215,9 +241,51 @@ impl Plan {
                 out.push(a);
             }
         }
-        out.sort_by_key(|a| &a.id);
-        out.dedup_by_key(|a| &a.id);
+        // a2 before a10: the same order the plan lists them in.
+        out.sort_by_key(|a| (a.id.len(), a.id.clone()));
+        out.dedup_by_key(|a| a.id.clone());
         Ok(out)
+    }
+}
+
+/// A shown confirmation: `apply` runs exactly these actions, and only with this token. Previewing
+/// changes nothing, so it can be a read-only tool; the token makes the preview impossible to skip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preview {
+    pub token: String,
+    pub plan: String,
+    pub actions: Vec<String>,
+    pub created: u64,
+}
+
+/// Long enough for the user to read and answer; short enough that the machine has not moved on.
+pub const PREVIEW_TTL_SECS: u64 = 3600;
+
+impl Preview {
+    pub fn new(plan: &Plan, chosen: &[&Action]) -> Self {
+        let actions: Vec<String> = chosen.iter().map(|a| a.id.clone()).collect();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let seed = format!("{}|{}|{nanos}|{}", plan.id, actions.join(","), std::process::id());
+        let hash = seed.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+        Preview { token: format!("t-{hash:016x}"), plan: plan.id.clone(), actions, created: unix_now() }
+    }
+
+    pub fn save(&self) -> std::io::Result<PathBuf> {
+        write_json("previews", &self.token, self)
+    }
+
+    /// Loads and consumes the token: one preview, one apply.
+    pub fn take(token: &str) -> Result<Self, String> {
+        let preview: Preview = read_json("previews", token)
+            .map_err(|_| format!("unknown or already used token `{token}`; preview the actions again"))?;
+        let _ = std::fs::remove_file(data_dir().join("previews").join(format!("{token}.json")));
+        if unix_now().saturating_sub(preview.created) > PREVIEW_TTL_SECS {
+            return Err(format!("token {token} is older than 1h; preview the actions again"));
+        }
+        Ok(preview)
     }
 }
 
@@ -263,6 +331,21 @@ pub struct Journal {
     pub outcomes: Vec<Outcome>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub script: Option<PathBuf>,
+    /// When `undo` restored it. A second undo would overwrite whatever the user set since.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub undone: Option<u64>,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Done => "done",
+            Status::Partial => "partial",
+            Status::Failed => "failed",
+            Status::Scripted => "scripted",
+            Status::Refused => "refused",
+        }
+    }
 }
 
 impl Journal {
@@ -281,8 +364,9 @@ impl Journal {
                             "id": j.id,
                             "plan": j.plan,
                             "created": j.created,
-                            "actions": j.outcomes.iter().map(|o| format!("{} {:?}", o.action, o.status)).collect::<Vec<_>>(),
-                            "undoable": j.outcomes.iter().any(|o| !o.registry.is_empty()),
+                            "actions": j.outcomes.iter().map(|o| format!("{} {}", o.action, o.status.as_str())).collect::<Vec<_>>(),
+                            "undoable": j.undone.is_none() && j.outcomes.iter().any(|o| !o.registry.is_empty()),
+                            "undone": j.undone,
                         });
                         (j.created, summary)
                     })
@@ -329,6 +413,12 @@ impl Applier<'_> {
                     Op::EmptyDir { rule } => {
                         let report = cleanup::clean(self.kb, std::slice::from_ref(rule), false);
                         serde_json::to_value(report).unwrap_or_default()
+                    }
+                    Op::RemoveDir { rule, path } => {
+                        match cleanup::check_build_folder(self.kb, rule, std::path::Path::new(path)) {
+                            Ok(dir) => serde_json::json!({ "path": path, "size": Bytes(crate::scan::du_unique(&dir)) }),
+                            Err(e) => serde_json::json!({ "path": path, "refused": e }),
+                        }
                     }
                     Op::SetRegistry { key, values } => serde_json::Value::Array(
                         values
@@ -389,6 +479,7 @@ impl Applier<'_> {
             }
             outcomes.push(match &a.op {
                 Op::EmptyDir { rule } => self.empty(a, rule),
+                Op::RemoveDir { rule, path } => self.remove_dir(a, rule, path),
                 Op::SetRegistry { key, values } => self.set_registry(a, key, values),
                 Op::Script { .. } => unreachable!("handled above"),
             });
@@ -396,7 +487,7 @@ impl Applier<'_> {
         let created = unix_now();
         let id = format!("{}-{created}", plan.id);
         let script = (!script_steps.is_empty()).then(|| export_script(&id, &script_steps)).and_then(Result::ok);
-        let journal = Journal { id, plan: plan.id.clone(), created, outcomes, script };
+        let journal = Journal { id, plan: plan.id.clone(), created, outcomes, script, undone: None };
         let _ = write_json("journal", &journal.id, &journal);
         journal
     }
@@ -411,12 +502,31 @@ impl Applier<'_> {
         }
         let report = cleanup::clean(self.kb, &[rule_id.to_string()], true);
         let skipped: Vec<String> = report.items.iter().filter_map(|i| i.skipped.clone()).collect();
+        // What the rule keeps on purpose is reported, but the action still did all it should.
+        let notes: Vec<String> =
+            report.items.iter().flat_map(|i| [i.skipped.clone(), i.kept.clone()]).flatten().collect();
         Outcome {
             action: a.id.clone(),
             status: if skipped.is_empty() { Status::Done } else { Status::Partial },
             freed: Some(report.freed),
             registry: vec![],
-            message: (!skipped.is_empty()).then(|| skipped.join("; ")),
+            message: (!notes.is_empty()).then(|| notes.join("; ")),
+        }
+    }
+
+    fn remove_dir(&self, a: &Action, rule: &str, path: &str) -> Outcome {
+        match cleanup::remove_build_folder(self.kb, rule, std::path::Path::new(path)) {
+            Err(why) => refused(a, &why),
+            Ok((freed, failures)) => Outcome {
+                action: a.id.clone(),
+                status: if failures == 0 { Status::Done } else { Status::Partial },
+                freed: Some(Bytes(freed)),
+                registry: vec![],
+                message: (failures > 0).then(|| {
+                    let entries = if failures == 1 { "entry" } else { "entries" };
+                    format!("{failures} {entries} in use (a running build, editor or language server?); the rest was removed")
+                }),
+            },
         }
     }
 
@@ -469,8 +579,21 @@ impl Applier<'_> {
         }
     }
 
-    /// Restores every journaled registry value, newest first.
-    pub fn undo(&self, journal: &Journal) -> Vec<serde_json::Value> {
+    /// Restores every journaled registry value, newest first, once: the journal is marked undone
+    /// when every value was restored, and a second call is refused.
+    pub fn undo(&self, journal: &mut Journal) -> Result<Vec<serde_json::Value>, String> {
+        if let Some(at) = journal.undone {
+            return Err(format!(
+                "{} was already undone (unix time {at}); undoing again would overwrite any change made since",
+                journal.id
+            ));
+        }
+        if journal.outcomes.iter().all(|o| o.registry.is_empty()) {
+            return Err(format!(
+                "{} changed no registry values, so there is nothing to undo (deleted caches regenerate on their own)",
+                journal.id
+            ));
+        }
         let mut results = Vec::new();
         for outcome in journal.outcomes.iter().rev() {
             for c in outcome.registry.iter().rev() {
@@ -487,7 +610,12 @@ impl Applier<'_> {
                 }));
             }
         }
-        results
+        if results.iter().all(|r| r["ok"] == true) {
+            journal.undone = Some(unix_now());
+            write_json("journal", &journal.id, journal)
+                .map_err(|e| format!("values restored, journal not updated: {e}"))?;
+        }
+        Ok(results)
     }
 }
 
@@ -565,6 +693,7 @@ fn export_script(journal_id: &str, steps: &[ScriptStep]) -> std::io::Result<Path
                 lines.join("\n    ")
             }
             Op::EmptyDir { rule } => format!("agenticdisk clean {rule} --apply"),
+            Op::RemoveDir { path, .. } => format!("Remove-Item -LiteralPath {} -Recurse -Force", ps_literal(path)),
         };
         out.push_str(&format!(
             "if (Confirm-Step {}) {{\n    {body}\n}}\n\n",
@@ -600,6 +729,9 @@ mod tests {
             consent,
             admin: false,
             reclaim: None,
+            size: None,
+            path: None,
+            idle_days: None,
             note: None,
             undo: String::new(),
             op,
@@ -635,11 +767,19 @@ mod tests {
         }
     }
 
+    /// Tests that write plans, previews or journals share one scratch AGENTICDISK_HOME, one at a time.
+    fn scratch_home() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("agenticdisk-test-home-{}", std::process::id()));
+        // SAFETY: every test that reads AGENTICDISK_HOME holds LOCK while it does.
+        unsafe { std::env::set_var("AGENTICDISK_HOME", &home) };
+        (guard, home)
+    }
+
     #[test]
     fn apply_journals_verifies_refuses_and_undoes() {
-        // SAFETY: only this test reads AGENTICDISK_HOME; it points journals at a scratch folder.
-        let home = std::env::temp_dir().join(format!("agenticdisk-journal-test-{}", std::process::id()));
-        unsafe { std::env::set_var("AGENTICDISK_HOME", &home) };
+        let (_lock, home) = scratch_home();
         let fake = Fake { sticky: vec!["Blocked".into()], ..Default::default() };
         fake.values.lock().unwrap().insert(("HKCU\\Allowed".into(), "Existing".into()), RegData::Dword(1));
         let kb = Kb::load();
@@ -680,8 +820,13 @@ mod tests {
         assert!(journal.script.as_ref().is_some_and(|s| s.exists()));
         assert_eq!(fake.reg_read("HKCU\\Allowed", "Existing").unwrap(), Some(RegData::Dword(0)));
 
-        let restored = applier.undo(&Journal::load(&journal.id).unwrap());
+        let restored = applier.undo(&mut Journal::load(&journal.id).unwrap()).unwrap();
         assert!(restored.iter().all(|r| r["ok"] == true));
+        fake.reg_write("HKCU\\Allowed", "Existing", &RegData::Dword(7)).unwrap();
+        let again = applier.undo(&mut Journal::load(&journal.id).unwrap());
+        assert!(again.unwrap_err().contains("already undone"), "a second undo must not clobber later changes");
+        assert_eq!(fake.reg_read("HKCU\\Allowed", "Existing").unwrap(), Some(RegData::Dword(7)));
+        fake.reg_write("HKCU\\Allowed", "Existing", &RegData::Dword(1)).unwrap();
         assert_eq!(
             fake.reg_read("HKCU\\Allowed", "Existing").unwrap(),
             Some(RegData::Dword(1)),
@@ -700,11 +845,43 @@ mod tests {
                 action("a2", Safety::Safe, Consent::Software, Op::Script { script: "x".into() }),
                 action("a3", Safety::Caution, Consent::Cache, Op::EmptyDir { rule: "x".into() }),
                 action("a4", Safety::Safe, Consent::Rollback, Op::EmptyDir { rule: "y".into() }),
+                action(
+                    "a5",
+                    Safety::Safe,
+                    Consent::Project,
+                    Op::RemoveDir { rule: "dev.rust_target".into(), path: "C:\\p\\target".into() },
+                ),
             ],
         );
         let ids: Vec<_> = plan.select(&["safe".into()], true).unwrap().iter().map(|a| a.id.clone()).collect();
-        assert_eq!(ids, ["a1"]);
+        assert_eq!(ids, ["a1"], "build folders are never batched, even idle ones");
         assert!(plan.select(&["all".into()], true).is_err());
         assert_eq!(plan.select(&["a2".into(), "a1".into(), "a2".into()], true).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn preview_tokens_are_single_use() {
+        let (_lock, home) = scratch_home();
+        let plan =
+            Plan::new("space", vec![action("a1", Safety::Safe, Consent::Cache, Op::EmptyDir { rule: "r".into() })]);
+        let chosen: Vec<&Action> = plan.actions.iter().collect();
+        let preview = Preview::new(&plan, &chosen);
+        preview.save().unwrap();
+        let taken = Preview::take(&preview.token).unwrap();
+        assert_eq!((taken.plan.as_str(), taken.actions.as_slice()), (plan.id.as_str(), ["a1".to_string()].as_slice()));
+        assert!(Preview::take(&preview.token).unwrap_err().contains("already used"));
+        assert!(Preview::take("t-..\\x").is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn selection_keeps_plan_order() {
+        let ids = ["a1", "a2", "a10", "a11"];
+        let plan = Plan::new(
+            "space",
+            ids.iter().map(|id| action(id, Safety::Safe, Consent::Cache, Op::EmptyDir { rule: "r".into() })).collect(),
+        );
+        let picked: Vec<_> = plan.select(&["safe".into()], true).unwrap().iter().map(|a| a.id.clone()).collect();
+        assert_eq!(picked, ids);
     }
 }

@@ -11,8 +11,8 @@ approve, and every change is journaled and undoable.
 agenticdisk                     # overview: everything, in parallel, ~2s
 agenticdisk goals               # what the user can ask for
 agenticdisk plan space          # numbered actions + questions; changes nothing
-agenticdisk apply space-1a2b3c4d --actions a2,a5        # shows exactly what would change
-agenticdisk apply space-1a2b3c4d --actions a2,a5 --yes  # after the user agrees
+agenticdisk preview space-1a2b3c4d --actions a2,a5  # exactly what would change + a token
+agenticdisk apply --token t-0123456789abcdef        # after the user agrees
 agenticdisk undo <journal>      # reverts the settings that run changed
 ```
 
@@ -33,10 +33,13 @@ Tell me in one line when it's ready, then ask me what I want to fix: more space,
 ```
 
 The server is the same binary (`agenticdisk mcp`, stdio): every tool runs the same code as the
-CLI command it mirrors. Tools: `pc_goals`, `pc_overview`, `pc_plan`, `pc_apply` (the only one that
-changes anything, in two steps), `pc_undo`, `pc_history`, `pc_inspect`, `pc_disk`, `pc_explain`,
-`pc_clean_preview`, `pc_rules`; prompt `fix_my_pc`; resources `agenticdisk://docs/agents` and
-`agenticdisk://docs/safety`.
+CLI command it mirrors. Tools: `pc_goals`, `pc_overview`, `pc_plan`, `pc_preview` (read-only: the
+exact confirmation text and a token), `pc_apply` (the only one that changes anything: takes that
+token), `pc_undo`, `pc_history`, `pc_inspect`, `pc_disk`, `pc_explain`, `pc_clean_preview`,
+`pc_rules`; prompt `fix_my_pc`; resources `agenticdisk://docs/agents` and
+`agenticdisk://docs/safety`. Previewing is a separate read-only tool so that clients which gate
+destructive tools (permission rules, auto-mode classifiers) let the agent show the user what will
+change before asking.
 
 ### Testing before the npm release
 
@@ -69,7 +72,7 @@ agenticdisk encodes what a careful expert would do:
 | What the agent needs | What agenticdisk provides |
 |---|---|
 | The picture, fast and small | 8 collectors in parallel, ranked findings, sizes as `"12.4G"`, `--max-findings` |
-| "What is this folder? Can I delete it?" | Knowledge base: 56 space rules (87 locations and build-folder patterns), 18 privacy checks, 62 app entries, `explain <path>`, real last-used age |
+| "What is this folder? Can I delete it?" | Knowledge base: 57 space rules (91 locations and build-folder patterns), 18 privacy checks, 62 app entries, `explain <path>`, real last-used age |
 | What the user actually wants | Goals (`space`, `speed`, `privacy`, `debloat`, `security`, `stability`, `gaming`, `all`) mapped to findings, with grouped questions to ask |
 | Root causes, not symptoms | Blue screens with stop codes and dump paths, boot-time service timeouts with dates, hardware (WHEA) errors |
 | Safe changes | Consent classes, protected paths, journaled and verified writes, `undo`, scripts for anything risky |
@@ -91,7 +94,7 @@ agenticdisk encodes what a careful expert would do:
 
 Reading is broad and never changes anything. Writing is narrow:
 
-- agenticdisk itself only empties knowledge-base cache folders and sets allow-listed registry values;
+- agenticdisk itself only empties knowledge-base cache folders, deletes the build folders you name (re-checked against their project marker) and sets allow-listed registry values;
 - everything else (uninstalls, DISM, drivers, admin steps) becomes a script you review and run, with one confirmation per step;
 - every write is journaled and verified, and settings can be undone;
 - personal files are never deleted, and protected folders cannot be targeted by any rule, variable or `..`.
@@ -107,8 +110,13 @@ See [SAFETY.md](SAFETY.md) for the full guarantees and [AGENTS.md](AGENTS.md) fo
 Every report prints one JSON document: `summary` (counts and reclaimable space, computed before any
 filtering), `findings` (most severe and largest first), `sections`, `blind_spots` and `next`. Each
 finding has a stable `id`, `severity`, `evidence`, `reclaim` (or `size` when a fix frees only part of
-it) and a `fix` with `safety`, `consent`, `admin`, `command` and, when agenticdisk can apply it
-itself, a machine-readable `op`.
+it) and a `fix` with `safety`, `consent`, `admin` and either `command` (for the user to run) or
+`auto: true` (agenticdisk applies it itself through `plan` + `apply`, journaled and undoable, so the
+raw command is left out on purpose). Over MCP, `next` hints name tools (`pc_preview(...)`) instead of
+command lines. `plan` lists actions of one kind (build folders, virtual disks) once, as a group whose
+`items` carry the per-folder `id`, `path`, `reclaim` and `idle_days`, and for `space` adds
+`coverage`: how much of the drive's used space the plan accounts for. `--bytes` (MCP: `bytes: true`)
+prints exact integers.
 
 ## Architecture
 
@@ -134,6 +142,7 @@ Windows 11, 12 threads, NVMe, not elevated:
 |---|---|
 | `overview` | ~1.5-2 s warm |
 | `stability` (90 days of event log) | ~0.1 s |
+| `plan space` (includes a build-folder scan of the user profile) | ~8 s warm |
 | `disk C:\Users\me` (449 GB, ~2M files) | 6-7 s warm; ~15.5 s cold with the default 64 I/O threads (~24 s with 12) |
 
 Cold directory enumeration is latency-bound, so the walker keeps many requests in flight on SSDs

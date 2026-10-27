@@ -45,7 +45,8 @@ The same binary is a CLI: `npx -y agenticdisk` (overview), `goals`, `plan <goal>
 | `pc_goals` | What the user can ask for, and the question to ask them |
 | `pc_overview` | Everything at once, ranked, ~2 s |
 | `pc_plan` | Numbered actions for a goal + grouped questions for the user (changes nothing) |
-| `pc_apply` | The only tool that changes anything: preview first, then `confirmed: true` after the user agrees |
+| `pc_preview` | Read-only: the exact text of what will change, and a one-use token |
+| `pc_apply` | The only tool that changes anything: takes the token, after the user agrees |
 | `pc_undo`, `pc_history` | Revert registry changes; list past runs |
 | `pc_inspect` | Full detail for one area (system, cleanup, drivers, privacy, startup, apps, security, stability) |
 | `pc_disk` | Size tree with largest files and known caches, with idle days |
@@ -57,7 +58,8 @@ Plus the `fix_my_pc` prompt and the `agents` / `safety` documents as resources.
 
 ## Safety
 
-agenticdisk itself only empties known cache folders (skipping anything changed in the last days)
-and sets allow-listed registry values. Both kinds of change are journaled and verified, and
+agenticdisk itself only empties known cache folders (skipping anything changed in the last days),
+deletes the build folders the user names (re-checked against their project marker) and sets
+allow-listed registry values. Both kinds of change are journaled and verified, and
 settings can be undone. Uninstalls, driver removal and admin steps become a script you review and
 run. Personal folders are protected. Provided as is, without warranty (MIT License).

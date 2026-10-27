@@ -44,7 +44,7 @@ jobs:
         run: cargo build --release --locked
 
       # Read-only end-to-end checks on a clean machine. Nothing here may change the runner:
-      # `apply` is called without --yes and must stop at the confirmation step.
+      # `preview` and `apply` without --yes or a token must stop at the confirmation step.
       - name: Smoke test
         shell: pwsh
         run: |
@@ -73,8 +73,11 @@ jobs:
 
           $plan = Run @('plan', 'privacy')
           if ($plan.actions.Count -gt 0) {
-            $preview = Run @('apply', $plan.plan, '--actions', $plan.actions[0].id)
-            if ($preview.status -ne 'awaiting_confirmation') { throw "apply without --yes must not run (status: $($preview.status))" }
+            $first = if ($plan.actions[0].id) { $plan.actions[0].id } else { $plan.actions[0].items[0].id }
+            foreach ($cmd in @('preview', 'apply')) {
+              $preview = Run @($cmd, $plan.plan, '--actions', $first)
+              if ($preview.status -ne 'awaiting_confirmation' -or -not $preview.token) { throw "$cmd without --yes must only preview (status: $($preview.status))" }
+            }
           }
 
           $all = & $exe apply $plan.plan --actions all | ConvertFrom-Json
@@ -89,7 +92,7 @@ jobs:
           $replies = $requests | & $exe mcp | ForEach-Object { $_ | ConvertFrom-Json }
           if ($replies.Count -ne 2) { throw "mcp: expected 2 replies, got $($replies.Count)" }
           if ($replies[0].result.serverInfo.name -ne 'agenticdisk') { throw 'mcp: bad initialize reply' }
-          if ($replies[1].result.tools.Count -lt 11) { throw 'mcp: tools missing' }
+          if ($replies[1].result.tools.Count -lt 12) { throw 'mcp: tools missing' }
           'smoke test passed'
 
       # The npm package must stay publishable: pack it (prepack stages the binary) and run it.

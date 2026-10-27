@@ -50,6 +50,20 @@ pub fn merge(sections: Vec<(&str, Section)>) -> (Vec<Finding>, Vec<String>, serd
     (findings, blind_spots, out)
 }
 
+/// A fix agenticdisk can apply itself shows `auto: true` instead of its `reg add` text and `op`:
+/// the agent goes through plan/apply (journaled, undoable) and never pastes the command by hand.
+fn finding_view(f: &Finding) -> Value {
+    let mut v = serde_json::to_value(f).expect("finding serializes");
+    if let Some(fix) = v.get_mut("fix").and_then(Value::as_object_mut)
+        && fix.remove("op").is_some()
+    {
+        fix.remove("command");
+        fix.remove("clean_rule");
+        fix.insert("auto".into(), true.into());
+    }
+    v
+}
+
 pub struct View {
     pub min: Severity,
     pub max: Option<usize>,
@@ -76,9 +90,29 @@ pub fn envelope(
         "elevated": crate::elevated(),
         "took_ms": started.elapsed().as_millis() as u64,
         "summary": summary(&all, below_min, truncated),
-        "findings": shown,
+        "findings": shown.into_iter().map(finding_view).collect::<Vec<_>>(),
         "sections": sections,
         "blind_spots": blind_spots,
         "next": next,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use agenticdisk_core::action::Op;
+    use agenticdisk_core::model::{Area, Fix};
+
+    use super::*;
+
+    #[test]
+    fn fixes_agenticdisk_applies_hide_their_command() {
+        let auto = Finding::new("cleanup.x", Area::Cleanup, Severity::Low, "x")
+            .fix(Fix::command(Safety::Safe, "agenticdisk clean x --apply").op(Op::EmptyDir { rule: "x".into() }));
+        let v = finding_view(&auto);
+        assert_eq!(v["fix"]["auto"], true);
+        assert!(v["fix"].get("op").is_none() && v["fix"].get("command").is_none());
+        let manual = Finding::new("cleanup.y", Area::Cleanup, Severity::Low, "y")
+            .fix(Fix::command(Safety::Safe, "npm cache clean --force"));
+        assert_eq!(finding_view(&manual)["fix"]["command"], "npm cache clean --force");
+    }
 }

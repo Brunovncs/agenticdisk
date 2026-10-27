@@ -179,7 +179,14 @@ pub fn collect(detail: bool) -> Section {
         let silent = power_losses - crashes.len();
         findings.push(
             Finding::new("stability.unexpected_shutdowns", Area::Stability, if silent >= 3 { Severity::Medium } else { Severity::Low }, format!("{silent} unexpected shutdowns without a blue screen in the last {DAYS} days"))
-                .evidence(unexpected.iter().filter(|e| e.id == 41).take(8).map(|e| e.time.clone()))
+                // A 41 on the day of a bug check is that crash's reboot, not a silent one.
+                .evidence(
+                    unexpected
+                        .iter()
+                        .filter(|e| e.id == 41 && !crashes.iter().any(|c| c.date == e.date()))
+                        .take(8)
+                        .map(|e| e.time.clone()),
+                )
                 .detail("Kernel-Power 41 without a bug check: power loss, holding the power button, a PSU/overheating cut, or a hang the user reset. Ask the user which; if they did not cause them, check temperatures and the power supply."),
         );
     }
@@ -251,7 +258,8 @@ pub fn collect(detail: bool) -> Section {
     let mut data = serde_json::json!({
         "window_days": DAYS,
         "bluescreens": crashes.len(),
-        "unexpected_power_losses": power_losses,
+        "unclean_restarts": power_losses,
+        "unclean_restarts_without_bluescreen": power_losses.saturating_sub(crashes.len()),
         "dumps": dumps,
     });
     if detail {

@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::action::{Action, Plan};
 use crate::model::{Area, Consent, Finding, Safety, Severity};
+use crate::size::Bytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -160,21 +161,32 @@ pub struct Question {
     pub ask: String,
 }
 
-/// (key, question, [(action id, title)])
-type Family = (&'static str, &'static str, Vec<(String, String)>);
+/// (key, question, action ids)
+type Family = (&'static str, &'static str, Vec<String>);
 
 /// Families of near-identical actions get one question listing them all, not one each: a
 /// questionnaire of twenty prompts gets no honest answers.
-fn family(finding: &str) -> Option<(&'static str, &'static str)> {
+fn family(action: &Action) -> Option<(&'static str, &'static str)> {
+    let finding = action.finding.as_str();
     if finding.starts_with("startup.app.") {
         Some((
             "startup.app",
             "Which of these apps do you need to start automatically when you sign in? The others can be disabled (reversible):",
         ))
+    } else if finding.starts_with("disk.build.") {
+        Some((
+            "disk.build",
+            "Which of these build folders can go? Each is rebuilt on that project's next build, so keep the ones you are working on (`active` = changed in the last 2 weeks; idle_days = days since anything inside changed):",
+        ))
     } else if finding.starts_with("apps.optional.") {
         Some((
             "apps.optional",
             "Which of these preinstalled apps do you use? The ones you don't can be removed (reinstallable from the Store):",
+        ))
+    } else if action.consent == Consent::Cache && action.safety == Safety::Caution {
+        Some((
+            "cache.caution",
+            "Which of these can go? Each costs a re-download or rebuild if it is needed again (read each action's note first):",
         ))
     } else {
         None
@@ -186,6 +198,8 @@ pub struct Advice {
     pub finding: String,
     pub severity: Severity,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<Bytes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -208,10 +222,10 @@ pub fn build(goal: Goal, findings: &[Finding]) -> Built {
         let id = format!("a{}", actions.len() + 1);
         match Action::from_finding(id, f) {
             Some(action) => {
-                if let Some((key, ask)) = family(&action.finding) {
+                if let Some((key, ask)) = family(&action) {
                     match families.iter_mut().find(|(k, _, _)| *k == key) {
-                        Some((_, _, members)) => members.push((action.id.clone(), action.title.clone())),
-                        None => families.push((key, ask, vec![(action.id.clone(), action.title.clone())])),
+                        Some((_, _, members)) => members.push(action.id.clone()),
+                        None => families.push((key, ask, vec![action.id.clone()])),
                     }
                 } else if let Some(q) = question_for(&action) {
                     questions.push(q);
@@ -222,14 +236,19 @@ pub fn build(goal: Goal, findings: &[Finding]) -> Built {
                 finding: f.id.clone(),
                 severity: f.severity,
                 title: f.title.clone(),
-                note: f.fix.as_ref().and_then(|x| x.note.clone()).or_else(|| f.detail.clone()),
+                size: f.reclaim.or(f.size),
+                note: f
+                    .fix
+                    .as_ref()
+                    .and_then(|x| x.note.clone())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| f.detail.clone()),
             }),
         }
     }
-    for (_, ask, members) in families {
-        let list = members.iter().map(|(id, title)| format!("{id}: {title}")).collect::<Vec<_>>().join("; ");
-        questions
-            .push(Question { about: members.into_iter().map(|(id, _)| id).collect(), ask: format!("{ask} {list}") });
+    // The members' titles are in `actions`; repeating them here only costs tokens.
+    for (_, ask, about) in families {
+        questions.push(Question { ask: format!("{ask} {}", about.join(", ")), about });
     }
     Built { plan: Plan::new(goal.info().name, actions), advice, questions }
 }
@@ -251,4 +270,30 @@ fn question_for(a: &Action) -> Option<Question> {
         _ => return None,
     };
     Some(Question { about: vec![a.id.clone()], ask })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Fix;
+
+    fn finding(id: &str, safety: Safety) -> Finding {
+        Finding::new(id, Area::Disk, Severity::Low, id).fix(Fix::command(safety, "x").consent(Consent::Cache))
+    }
+
+    #[test]
+    fn families_get_one_question_each() {
+        let findings = [
+            finding("disk.build.dev.rust_target.1", Safety::Caution),
+            finding("disk.build.dev.node_modules.1", Safety::Caution),
+            finding("cleanup.dev.huggingface_cache", Safety::Caution),
+            finding("cleanup.dev.cargo_registry", Safety::Caution),
+            finding("cleanup.win.temp_user", Safety::Safe),
+        ];
+        let built = build(Goal::Space, &findings);
+        assert_eq!(built.plan.actions.len(), 5);
+        let about: Vec<_> = built.questions.iter().map(|q| q.about.join(",")).collect();
+        assert_eq!(about, ["a1,a2", "a3,a4"], "build folders and costly caches; nothing for the safe cache");
+        assert!(built.questions[0].ask.ends_with("a1, a2"));
+    }
 }

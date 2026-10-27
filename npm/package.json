@@ -1,6 +1,6 @@
 {
   "name": "agenticdisk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PC diagnostics and safe cleanup built for AI agents: disk space, caches, drivers, privacy, startup, bloat, security and crashes as compact JSON. MCP server included.",
   "keywords": [
     "mcp",

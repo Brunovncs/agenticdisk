@@ -9,8 +9,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 function fail(message) {
-  // Same shape as the binary's own errors, so agents parse one format.
-  process.stdout.write(JSON.stringify({ tool: 'agenticdisk', error: message }) + '\n');
+  // Same shape as the binary's own errors, so agents parse one format. As an MCP server stdout
+  // carries JSON-RPC only, so the client gets the reason on stderr (its server log).
+  const out = process.argv[2] === 'mcp' ? process.stderr : process.stdout;
+  out.write(JSON.stringify({ tool: 'agenticdisk', error: message }) + '\n');
   process.exit(1);
 }
 
