@@ -7,6 +7,10 @@ agenticdisk it gets the whole picture in about two seconds as compact, ranked JS
 picture into a numbered plan with the questions it should ask you. It applies only what you
 approve, and every change is journaled and undoable.
 
+![An agent plans a cleanup with agenticdisk, shows what can be deleted, previews the change and applies it after the user types yes](docs/demo.gif)
+
+<sub>A simulated session with made-up data.</sub>
+
 ```
 agenticdisk                     # overview: everything, in parallel, ~2s
 agenticdisk goals               # what the user can ask for
